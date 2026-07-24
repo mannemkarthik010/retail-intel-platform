@@ -1,0 +1,62 @@
+[
+  {
+    "feature": "rollmean_4",
+    "importance_mean": 6560.8859,
+    "importance_std": 66.2392
+  },
+  {
+    "feature": "lag_1",
+    "importance_mean": 5458.8688,
+    "importance_std": 53.7304
+  },
+  {
+    "feature": "IsHoliday",
+    "importance_mean": 1615.236,
+    "importance_std": 5.4664
+  },
+  {
+    "feature": "lag_52",
+    "importance_mean": 1607.2277,
+    "importance_std": 12.6608
+  },
+  {
+    "feature": "rollmean_12",
+    "importance_mean": 532.764,
+    "importance_std": 17.6659
+  },
+  {
+    "feature": "rollmean_8",
+    "importance_mean": 450.691,
+    "importance_std": 16.4469
+  },
+  {
+    "feature": "lag_2",
+    "importance_mean": 433.1342,
+    "importance_std": 14.0242
+  },
+  {
+    "feature": "lag_4",
+    "importance_mean": 302.1571,
+    "importance_std": 13.3688
+  },
+  {
+    "feature": "lag_8",
+    "importance_mean": 219.9271,
+    "importance_std": 20.4238
+  },
+  {
+    "feature": "rollstd_4",
+    "importance_mean": 201.4583,
+    "importance_std": 6.7628
+  },
+  {
+    "feature": "rollstd_8",
+    "importance_mean": 152.5977,
+    "importance_std": 6.7295
+  },
+  {
+    "feature": "Size",
+    "importance_mean": 152.1043,
+    "importance_std": 8.0436
+  }
+]

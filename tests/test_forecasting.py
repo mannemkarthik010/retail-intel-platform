@@ -60,5 +60,23 @@ class TestGlobalGBM(unittest.TestCase):
         self.assertTrue(np.all(preds >= 0))  # predictions are clipped at 0
 
 
+class TestQuantileGBM(unittest.TestCase):
+    def test_q10_predictions_are_generally_lower_than_q90(self):
+        """Not guaranteed pointwise (each quantile is an independently
+        trained model -- see intervals.gbm_quantile_interval's crossing
+        fix), but on average across many rows q10 should sit below q90."""
+        import pandas as pd
+        from src import features as feat
+        rng = np.random.default_rng(4)
+        n = 400
+        df = pd.DataFrame({c: rng.uniform(0, 1, n) for c in feat.FEATURE_COLUMNS})
+        df["Weekly_Sales"] = rng.uniform(1000, 5000, n)
+        q10 = fc.QuantileGBMModel.fit(df, 0.10)
+        q90 = fc.QuantileGBMModel.fit(df, 0.90)
+        p10, p90 = q10.predict(df), q90.predict(df)
+        self.assertEqual(len(p10), n)
+        self.assertLess(p10.mean(), p90.mean())
+
+
 if __name__ == "__main__":
     unittest.main()

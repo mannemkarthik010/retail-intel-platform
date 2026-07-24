@@ -95,5 +95,25 @@ def ask():
     return jsonify(trace.to_dict())
 
 
+@app.get("/api/explain")
+def explain_drivers():
+    store = int(request.args.get("store", 1))
+    dept = int(request.args.get("dept", 1))
+    week_ahead = int(request.args.get("week_ahead", 1))
+    return jsonify(TOOLS["explain_forecast_drivers"](store=store, dept=dept, week_ahead=week_ahead))
+
+
+@app.get("/api/simulate")
+def simulate_scenario_endpoint():
+    store = int(request.args.get("store", 1))
+    dept = int(request.args.get("dept", 1))
+    markdown_active = request.args.get("markdown_active", "false") == "true"
+    is_holiday_raw = request.args.get("is_holiday")  # absent -> None -> keep real calendar
+    is_holiday = None if is_holiday_raw is None else (is_holiday_raw == "true")
+    weeks = int(request.args.get("weeks", 4))
+    return jsonify(TOOLS["simulate_scenario"](store=store, dept=dept, markdown_active=markdown_active,
+                                               is_holiday=is_holiday, weeks=weeks))
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)

@@ -2,23 +2,29 @@
 
 Design goals (mirroring what the target job descriptions actually ask for):
   - Tool use, not a single giant prompt: the agent calls discrete, typed
-    tools (get_forecast, get_anomalies, explain_change, top_movers) and
-    reasons over their results.
+    tools (get_forecast, get_anomalies, explain_change, top_movers,
+    explain_forecast_drivers, simulate_scenario) and reasons over their
+    results.
   - Full audit trail: every tool call, its arguments, and its result are
     logged to an AgentTrace that's returned alongside the answer -- this is
     the auditability requirement Condor's JD calls out explicitly for
     financial data, and it generalizes to "can an enterprise user trust
     this system" (Merciv's framing).
   - Pluggable LLM backend: MockLLM (default, deterministic, no API key
-    needed, good for CI/tests/demos) or AnthropicLLM (real tool-calling
-    loop via the Messages API over plain HTTP, activated automatically if
-    ANTHROPIC_API_KEY is set). Swapping backends doesn't touch the tools
-    or the trace format at all -- only which "brain" decides which tool
-    to call next.
+    needed, good for CI/tests/demos), AnthropicLLM (real tool-calling loop
+    via the Messages API), or OpenAILLM (real tool-calling loop via the
+    Chat Completions API) -- both over plain HTTP, no vendor SDK, activated
+    automatically based on which API key is present in the environment.
+    Swapping backends doesn't touch the tools or the trace format at all --
+    only which "brain" decides which tool to call next. This multi-provider
+    pluggability is deliberate: Condor's job description names both
+    "Anthropic Claude or OpenAI" as acceptable providers, and a system that
+    hard-codes one vendor's SDK into its tool-calling logic can't honor that.
 """
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,11 +34,17 @@ import pandas as pd
 
 ROOT = Path(__file__).parent.parent
 REPORTS = ROOT / "reports"
+MODELS_DIR = REPORTS / "models"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # so `scripts.run_pipeline` is importable below
 
 
 # --------------------------------------------------------------------------
 # Data access layer the tools sit on top of (reads the artifacts produced by
-# scripts/run_pipeline.py -- the agent never re-trains or re-scores live)
+# scripts/run_pipeline.py -- the agent never re-trains or re-scores live,
+# with ONE deliberate exception: simulate_scenario, which by definition
+# asks about a covariate combination that was never scored offline -- see
+# src/scenario.py's docstring for why that one tool is different in kind.)
 # --------------------------------------------------------------------------
 class DataStore:
     def __init__(self):
@@ -40,9 +52,32 @@ class DataStore:
         self.series_summary = pd.read_csv(REPORTS / "series_summary.csv")
         self.anomalies = pd.read_csv(REPORTS / "anomaly_flags.csv", parse_dates=["Date"])
         self.selected_model = json.loads((REPORTS / "selected_model.json").read_text())
+        self._raw = None
+        self._point_gbm = None
+        self._feature_medians = None
 
     def series_key(self, store: int, dept: int) -> str:
         return f"S{store:02d}_D{dept:02d}"
+
+    def raw_sales(self):
+        """Lazily loaded, cached: only what simulate_scenario needs, since
+        every other tool here only ever reads the offline reports/*.csv."""
+        if self._raw is None:
+            from .data_io import load_all_merged
+            self._raw = load_all_merged()
+        return self._raw
+
+    def point_gbm(self):
+        if self._point_gbm is None:
+            import joblib
+            self._point_gbm = joblib.load(MODELS_DIR / "gbm_point.joblib")
+        return self._point_gbm
+
+    def feature_medians(self):
+        if self._feature_medians is None:
+            import joblib
+            self._feature_medians = joblib.load(MODELS_DIR / "feature_medians.joblib")
+        return self._feature_medians
 
 
 STORE = None  # lazy singleton so importing this module doesn't require artifacts to exist yet
@@ -72,7 +107,12 @@ def tool_get_forecast(store: int, dept: int) -> dict:
         "model_used": model_used,
         "backtest_wape": None if pd.isna(model_wape) else round(float(model_wape), 4),
         "forecast": [
-            {"date": str(r["forecast_date"].date()), "value": r["forecast_value"]}
+            {
+                "date": str(r["forecast_date"].date()),
+                "value": r["forecast_value"],
+                "low": r.get("forecast_low", None),
+                "high": r.get("forecast_high", None),
+            }
             for _, r in rows.iterrows()
         ],
     }
@@ -153,11 +193,91 @@ def tool_top_movers(direction: str = "down", n: int = 5) -> dict:
     return {"direction": direction, "movers": yoy_df.head(n).to_dict("records")}
 
 
+def tool_explain_forecast_drivers(store: int, dept: int, week_ahead: int = 1) -> dict:
+    """Local, occlusion-based feature attribution for one specific
+    forecasted week (src/explain.py) -- only meaningful for series whose
+    selected model is the global GBM, since seasonal_naive/Holt-Winters
+    have no per-feature model to attribute anything to."""
+    from .backtest import HORIZON, _recursive_gbm_forecast_with_rows
+    from . import explain
+
+    ds = _store()
+    key = ds.series_key(store, dept)
+    model_used = ds.selected_model.get(key)
+    if model_used != "global_gbm":
+        return {"error": f"driver explanations are only available for series whose selected "
+                          f"model is global_gbm (this series' selected model is {model_used}, "
+                          f"a classical method with no per-feature attribution to give)"}
+    week_ahead = max(1, min(int(week_ahead), HORIZON))
+
+    raw = ds.raw_sales()
+    hist = raw[(raw.Store == store) & (raw.Dept == dept)].sort_values("Date")
+    if hist.empty:
+        return {"error": f"no history for store={store} dept={dept}"}
+
+    from scripts.run_pipeline import make_future_covariates, _gbm_covariates_for_series
+    future_cov = make_future_covariates(raw, HORIZON)
+    cov = _gbm_covariates_for_series(future_cov, hist, store, dept)
+
+    model = ds.point_gbm()
+    _, rows = _recursive_gbm_forecast_with_rows(model, hist, cov, HORIZON)
+    row = rows[week_ahead - 1]
+
+    result = explain.occlusion_attribution(model, row, ds.feature_medians())
+    result["series"] = key
+    result["week_ahead"] = week_ahead
+    result["forecast_date"] = str(cov["Date"].iloc[week_ahead - 1].date())
+    return result
+
+
+def tool_simulate_scenario(store: int, dept: int, markdown_active: bool = False,
+                            is_holiday: bool = None, weeks: int = 4) -> dict:
+    """What-if simulation (src/scenario.py) -- the one tool that genuinely
+    recomputes rather than reading a precomputed artifact, since a
+    hypothetical covariate combination was never scored offline. Only
+    meaningful for global_gbm-selected series (see scenario.py docstring).
+
+    `is_holiday=None` (the default) means "don't touch the real calendar,"
+    so asking a markdown-only question doesn't silently strip out a real
+    holiday flag on a week that genuinely is one -- pass True/False only
+    when the question is explicitly ABOUT holiday-ness."""
+    from .backtest import HORIZON
+    from . import scenario
+
+    ds = _store()
+    key = ds.series_key(store, dept)
+    model_used = ds.selected_model.get(key)
+    if model_used != "global_gbm":
+        return {"error": f"what-if simulation is only available for series whose selected "
+                          f"model is global_gbm (this series' selected model is {model_used}, "
+                          f"which has no markdown/holiday covariate slots to hypothetically change)"}
+    weeks = max(1, min(int(weeks), HORIZON))
+
+    raw = ds.raw_sales()
+    scenario_preds = scenario.simulate_scenario(raw, store, dept, markdown_active, is_holiday, weeks)
+    if scenario_preds is None:
+        return {"error": f"no history for store={store} dept={dept}"}
+
+    baseline_rows = ds.forecasts[ds.forecasts["series"] == key].sort_values("week_ahead").head(weeks)
+    baseline = baseline_rows["forecast_value"].values
+    return {
+        "series": key,
+        "assumptions": {"markdown_active": markdown_active, "is_holiday": is_holiday, "weeks": weeks},
+        "baseline_forecast": [round(float(b), 2) for b in baseline],
+        "scenario_forecast": [round(float(s), 2) for s in scenario_preds],
+        "delta_vs_baseline": [round(float(s - b), 2) for s, b in zip(scenario_preds, baseline)],
+        "note": "baseline uses the pipeline's default future assumptions (no active promo, "
+                "real calendar holidays); this scenario overrides only markdown_active/is_holiday.",
+    }
+
+
 TOOLS: dict[str, Callable[..., dict]] = {
     "get_forecast": tool_get_forecast,
     "get_anomalies": tool_get_anomalies,
     "explain_change": tool_explain_change,
     "top_movers": tool_top_movers,
+    "explain_forecast_drivers": tool_explain_forecast_drivers,
+    "simulate_scenario": tool_simulate_scenario,
 }
 
 TOOL_SPECS = [
@@ -199,6 +319,37 @@ TOOL_SPECS = [
             "properties": {"direction": {"type": "string", "enum": ["up", "down"]},
                             "n": {"type": "integer"}},
             "required": [],
+        },
+    },
+    {
+        "name": "explain_forecast_drivers",
+        "description": "Explain which input features drove a specific forecasted week's number "
+                       "for one series, via occlusion-based local attribution (not SHAP). Only "
+                       "available for series whose selected model is the global GBM.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"store": {"type": "integer"}, "dept": {"type": "integer"},
+                            "week_ahead": {"type": "integer", "description": "1-8, which forecasted week to explain"}},
+            "required": ["store", "dept"],
+        },
+    },
+    {
+        "name": "simulate_scenario",
+        "description": "What-if simulation: recompute a series' forecast under a hypothetical "
+                       "active markdown promotion and/or holiday week, and report the delta vs. "
+                       "the baseline forecast. Only available for series whose selected model is "
+                       "the global GBM.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "store": {"type": "integer"}, "dept": {"type": "integer"},
+                "markdown_active": {"type": "boolean", "description": "hypothetically run an active promo"},
+                "is_holiday": {"type": "boolean", "description": "only set this if the question explicitly asks "
+                                                                  "about holiday-ness; omit it to keep the real "
+                                                                  "calendar (don't default it to false)"},
+                "weeks": {"type": "integer", "description": "how many weeks ahead to simulate, 1-8"},
+            },
+            "required": ["store", "dept"],
         },
     },
 ]
@@ -263,6 +414,49 @@ class MockLLM:
             lines = [f"Store {m['series'][1:3]}, Dept {m['series'][-2:]}: {m['pct_change_yoy']:+.1f}% YoY"
                       for m in movers]
             return f"Top {direction} movers year-over-year:\n" + "\n".join(lines)
+
+        if "what if" in q or "what-if" in q or "scenario" in q or "hypothetical" in q:
+            markdown_active = any(w in q for w in ["markdown", "promo", "promotion", "discount", "sale"])
+            # None = leave the real calendar alone (don't silently strip a
+            # genuine holiday flag just because the question was about a
+            # markdown); only override when the question explicitly names
+            # holiday-ness one way or the other.
+            if "not a holiday" in q or "non-holiday" in q or "no holiday" in q:
+                is_holiday = False
+            elif "holiday" in q:
+                is_holiday = True
+            else:
+                is_holiday = None
+            weeks_m = re.search(r"(\d+)\s*week", q)
+            weeks = int(weeks_m.group(1)) if weeks_m else 4
+            args = {"store": store, "dept": dept, "markdown_active": markdown_active,
+                    "is_holiday": is_holiday, "weeks": weeks}
+            result = TOOLS["simulate_scenario"](**args)
+            trace.log_step("simulate_scenario", args, result,
+                            reasoning=f"Question is a what-if -> simulate store {store} dept {dept} "
+                                      f"under markdown_active={markdown_active}, is_holiday={is_holiday}.")
+            if "error" in result:
+                return result["error"]
+            lines = [f"week {i+1}: baseline ${b:,.0f} -> scenario ${s:,.0f} ({d:+,.0f})"
+                     for i, (b, s, d) in enumerate(zip(result["baseline_forecast"], result["scenario_forecast"],
+                                                        result["delta_vs_baseline"]))]
+            return (f"Store {store} / Dept {dept} what-if (markdown_active={markdown_active}, "
+                    f"is_holiday={is_holiday}):\n" + "\n".join(lines))
+
+        if "driver" in q or "driving the forecast" in q or "feature" in q or "what's pushing" in q:
+            week_m = re.search(r"week\s*(\d+)", q)
+            week_ahead = int(week_m.group(1)) if week_m else 1
+            args = {"store": store, "dept": dept, "week_ahead": week_ahead}
+            result = TOOLS["explain_forecast_drivers"](**args)
+            trace.log_step("explain_forecast_drivers", args, result,
+                            reasoning=f"Question asks what's driving the forecast for store {store} "
+                                      f"dept {dept}, week {week_ahead} -> occlusion attribution.")
+            if "error" in result:
+                return result["error"]
+            lines = [f"{d['feature']}: actual {d['actual_value']} vs. typical {d['median_value']} "
+                     f"-> {d['impact']:+.0f} impact on the forecast" for d in result["top_drivers"]]
+            return (f"Store {store} / Dept {dept}, week {week_ahead} forecast "
+                    f"(${result['baseline_prediction']:,.0f}) -- top drivers:\n" + "\n".join(lines))
 
         if "why" in q or "explain" in q:
             result = TOOLS["explain_change"](store=store, dept=dept)
@@ -361,9 +555,106 @@ class AnthropicLLM:
         return "(hit max tool-call turns without a final answer)"
 
 
+def _to_openai_tool_specs():
+    """OpenAI's function-calling schema is the same JSON Schema Anthropic
+    uses for `input_schema`, just wrapped differently -- no logic to
+    duplicate, only a shape change."""
+    return [
+        {"type": "function", "function": {
+            "name": spec["name"],
+            "description": spec["description"],
+            "parameters": spec["input_schema"],
+        }}
+        for spec in TOOL_SPECS
+    ]
+
+
+# --------------------------------------------------------------------------
+# Backend 3: real OpenAI tool-calling loop, plain HTTP (no SDK dependency)
+# Activated automatically if OPENAI_API_KEY is set (and ANTHROPIC_API_KEY
+# isn't, unless LLM_BACKEND=openai forces it -- see get_llm_backend()).
+# --------------------------------------------------------------------------
+class OpenAILLM:
+    name = "openai"
+
+    def __init__(self, model: str = None, max_turns: int = 4):
+        import requests  # local import: only needed on this path
+        self._requests = requests
+        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        self.max_turns = max_turns
+        self.api_key = os.environ["OPENAI_API_KEY"]
+        self.tool_specs = _to_openai_tool_specs()
+
+    def _call(self, messages):
+        resp = self._requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "messages": messages,
+                "tools": self.tool_specs,
+                "tool_choice": "auto",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def answer(self, question: str, trace: AgentTrace) -> str:
+        messages = [
+            {"role": "system", "content": (
+                "You are a retail demand-forecasting analyst assistant. Use the "
+                "provided tools to answer questions about specific store/department "
+                "series. Always ground numeric claims in tool results, never guess."
+            )},
+            {"role": "user", "content": question},
+        ]
+        for _ in range(self.max_turns):
+            result = self._call(messages)
+            message = result["choices"][0]["message"]
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                return message.get("content") or "(no answer produced)"
+
+            messages.append(message)
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                fn = TOOLS.get(fn_name)
+                out = fn(**args) if fn else {"error": f"unknown tool {fn_name}"}
+                trace.log_step(fn_name, args, out, reasoning="(reasoning happened inside the model; "
+                                                              "this step is the tool call it chose to make)")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(out),
+                })
+        return "(hit max tool-call turns without a final answer)"
+
+
 def get_llm_backend():
+    """Selection order: an explicit LLM_BACKEND override always wins;
+    otherwise prefer whichever API key is present (Anthropic first, purely
+    because that's this project's primary integration target), falling
+    back to the deterministic mock so the system always runs."""
+    forced = os.environ.get("LLM_BACKEND", "").lower()
+    if forced == "anthropic":
+        return AnthropicLLM()
+    if forced == "openai":
+        return OpenAILLM()
+    if forced == "mock":
+        return MockLLM()
+
     if os.environ.get("ANTHROPIC_API_KEY"):
         return AnthropicLLM()
+    if os.environ.get("OPENAI_API_KEY"):
+        return OpenAILLM()
     return MockLLM()
 
 

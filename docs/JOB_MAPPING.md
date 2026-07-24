@@ -11,9 +11,13 @@ a project" interview answer.
 | Demand forecasting / time-series prediction at scale | `src/forecasting.py`, `src/backtest.py` — 240 series, 3 competing models |
 | Rolling-origin / backtesting, "best-fit selection" (Confido's exact phrase) | `src/backtest.py::run_backtest` — 6 cutoffs, per-series model selection |
 | Anomaly detection | `src/anomaly.py` — decomposition + robust z-score + IsolationForest cross-check |
-| Agentic AI architecture / multi-step reasoning over tools | `src/agent.py` — 4 tools, pluggable planner, full trace |
-| RAG / LLM integration for natural-language interfaces | `src/agent.py::AnthropicLLM` — real tool-calling loop, activates with an API key |
+| Agentic AI architecture / multi-step reasoning over tools | `src/agent.py` — 6 tools (including live what-if simulation and driver explainability), pluggable planner, full trace |
+| RAG / LLM integration for natural-language interfaces | `src/agent.py::AnthropicLLM` / `OpenAILLM` — real tool-calling loops, activate automatically based on which API key is present |
+| "Providers such as Anthropic Claude or OpenAI" (Condor's exact phrase) | Both are implemented as interchangeable backends behind the same tool registry and trace format — see `docs/ARCHITECTURE.md` |
 | "Systems enterprise users can actually trust" / interpretability (Merciv) | Every anomaly is labeled *why* (promo / holiday / genuinely unexplained); every agent answer carries its reasoning trace |
+| Uncertainty quantification / calibrated forecasts, not just point estimates (all five, implicitly) | `src/intervals.py` — 80% prediction intervals on every forecast, with a real held-out coverage check reported honestly (74.7% actual vs. 80% nominal) rather than assumed calibrated — see `docs/EVAL_REPORT.md` §4 |
+| Model interpretability / feature attribution (Merciv, Confido) | `src/explain.py` — occlusion-based local attribution + permutation-importance global ranking, both explicitly disclosed as SHAP-substitutes rather than passed off as SHAP |
+| Scenario / what-if analysis, decision support (Sigma, Confido) | `src/scenario.py` + agent tool `simulate_scenario` — recomputes the forecast under a hypothetical markdown/holiday and reports the delta vs. baseline |
 | Auditability, "correctness and auditability are non-negotiable" (Condor) | `AgentTrace` persisted to `reports/agent_traces.jsonl` for every question asked |
 | Own model performance end-to-end: monitoring, retraining (all five) | `scripts/run_monitoring_sim.py` — fleet-level + per-series drift detection |
 | Evaluation harnesses, "know which metric to trust... avoid leakage and train/serve skew" (Confido) | `tests/test_features.py` — explicit lookahead-leakage tests; WAPE/MAPE/RMSE tracked per series per cutoff, not one aggregate number |

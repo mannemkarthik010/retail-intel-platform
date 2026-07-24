@@ -13,8 +13,16 @@ data/generate_data.py                     scripts/run_pipeline.py
         +--------------------------------> src/anomaly.py  --------> reports/anomaly_flags.csv
         |                                          |
         +--------------------------------> forward forecast  ------> reports/current_forecasts.csv
-                                                    |
-                                                    v
+        |                                    (+ src/intervals.py       (+ forecast_low/high)
+        |                                     for 80% bands)
+        |                                          |
+        +--------------------------------> src/intervals.py           reports/interval_coverage.json
+        |                                    .validate_interval_coverage
+        |                                          |
+        +--------------------------------> permutation importance --> reports/feature_importance.json
+                                             (src/explain.py)      --> reports/models/*.joblib
+                                                    |                  (point + q10 + q90 GBM,
+                                                    v                   feature medians)
                                         scripts/run_monitoring_sim.py
                                                     |
                                                     v
@@ -25,7 +33,7 @@ data/generate_data.py                     scripts/run_pipeline.py
                                                     |
                                                     v
                               src/agent.py  <-- reads reports/*.csv, never re-trains
-                                    |
+                                    |               (except simulate_scenario -- see below)
                                     v
                               app/server.py (Flask)  <-- thin online layer
                                     |
@@ -96,10 +104,47 @@ library is behind them.
   `docs/DATA_PROVENANCE.md` for the full reasoning and how to swap in the
   real dataset yourself.
 
+## Prediction intervals and explainability
+
+Two capabilities were added after the initial build to make the forecasts
+themselves more trustworthy, not just accurate on average:
+
+- **`src/intervals.py`** — every forecast ships an 80% prediction interval,
+  not just a point number. global_gbm series get it from two extra
+  quantile-loss GBMs (`src/forecasting.py::QuantileGBMModel`, q=0.10 and
+  q=0.90); seasonal_naive/Holt-Winters series (no natural quantile
+  analogue) get a normal-approximation band scaled by that series'
+  backtested RMSE. `scripts/run_pipeline.py` validates the real,
+  held-out coverage of these bands every run (`reports/interval_coverage.json`)
+  rather than asserting they're calibrated — see `docs/EVAL_REPORT.md` §4
+  for the honest number (74.7% actual vs. 80% nominal) and why it runs
+  low.
+- **`src/explain.py`** — `shap` isn't installable in this sandbox, so local
+  feature attribution uses occlusion (median-replacement per feature,
+  documented as a simplified, non-Shapley approximation) and global
+  importance uses `sklearn.inspection.permutation_importance` (a real,
+  standard method, computed in-sample -- see `docs/EVAL_REPORT.md` §5).
+- **`src/scenario.py`** — what-if simulation. This is the ONE tool in the
+  whole system that doesn't just read a precomputed `reports/*.csv`
+  artifact: a hypothetical covariate combination (e.g. "run a markdown
+  promotion these next 3 weeks") was never scored offline by definition,
+  so it reuses the persisted point GBM (`reports/models/gbm_point.joblib`)
+  to recompute live. Both this and the explainability tool are only
+  meaningful for series whose selected model is global_gbm; both say so
+  explicitly rather than returning a fabricated number for
+  seasonal_naive/Holt-Winters series.
+
+All three trained artifacts these depend on (`gbm_point.joblib`,
+`gbm_q10.joblib`, `gbm_q90.joblib`, `feature_medians.joblib`) are persisted
+by `scripts/run_pipeline.py` via `joblib`, so the agent/dashboard reuse the
+EXACT model that produced the baseline forecast rather than silently
+retraining a slightly different one on demand.
+
 ## The agent layer
 
 `src/agent.py` implements tool use (`get_forecast`, `get_anomalies`,
-`explain_change`, `top_movers`) behind a pluggable "brain":
+`explain_change`, `top_movers`, `explain_forecast_drivers`,
+`simulate_scenario`) behind a pluggable "brain":
 
 - **`MockLLM`** (default): a deterministic keyword/regex router. No API key,
   no external calls, fully reproducible — good for CI, tests, and demos. Its
@@ -108,8 +153,19 @@ library is behind them.
 - **`AnthropicLLM`**: a real tool-calling loop against the Anthropic Messages
   API over plain HTTP (no SDK dependency — just `requests`), activated
   automatically the moment `ANTHROPIC_API_KEY` is set in the environment.
-  Swapping backends touches zero tool code and zero trace format — only which
-  component decides which tool to call next.
+- **`OpenAILLM`**: the same real tool-calling loop against OpenAI's Chat
+  Completions API, same plain-HTTP style, activated automatically when
+  `OPENAI_API_KEY` is set instead. Model defaults to `gpt-4o-mini`,
+  overridable via `OPENAI_MODEL`.
+
+Swapping backends touches zero tool code and zero trace format — only which
+component decides which tool to call next. Selection order in
+`get_llm_backend()`: an explicit `LLM_BACKEND=anthropic|openai|mock`
+environment variable always wins; otherwise Anthropic is preferred if its key
+is present, then OpenAI, then the mock. This multi-provider pluggability
+directly answers Condor's job description, which names both "Anthropic
+Claude or OpenAI" as acceptable providers — a system that hard-codes one
+vendor's SDK into its tool-calling logic can't honor that requirement.
 
 Every call, real or mock, produces an **`AgentTrace`**: the question, each
 tool call with its arguments and result, and the final answer, persisted to
@@ -124,7 +180,12 @@ Being direct about the gap matters more than papering over it:
 
 - No authentication, rate limiting, or multi-tenancy on the API.
 - The Flask dev server is explicitly not a production WSGI server (the
-  console warns about this on startup) — swap in gunicorn/uwsgi for real use.
+  console warns about this on startup). `requirements.txt` and the
+  `Dockerfile` both document the gunicorn swap-in (commented out, with the
+  exact commands) rather than silently applying it -- gunicorn itself
+  couldn't be installed in this build sandbox to verify the swap actually
+  works end-to-end, so "documented" and "verified" are kept as distinct
+  claims here.
 - Future macro covariates (CPI, unemployment, fuel price) are held at their
   last observed value for the forward forecast rather than forecast
   themselves — a documented simplifying assumption (see

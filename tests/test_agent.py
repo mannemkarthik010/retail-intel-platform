@@ -5,6 +5,7 @@ this mirrors production, where the online agent never re-scores live."""
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -45,6 +46,68 @@ class TestAgentTools(unittest.TestCase):
         pct_changes = [m["pct_change_yoy"] for m in down["movers"]]
         self.assertEqual(pct_changes, sorted(pct_changes))  # ascending = most negative first
 
+    def test_get_forecast_includes_prediction_interval(self):
+        from src.agent import tool_get_forecast
+        result = tool_get_forecast(store=1, dept=1)
+        first = result["forecast"][0]
+        self.assertIn("low", first)
+        self.assertIn("high", first)
+        self.assertLessEqual(first["low"], first["value"])
+        self.assertGreaterEqual(first["high"], first["value"])
+
+
+@unittest.skipUnless((REPORTS / "models" / "gbm_point.joblib").exists(),
+                      "run scripts/run_pipeline.py first to persist reports/models/*.joblib")
+class TestNewAgentTools(unittest.TestCase):
+    """explain_forecast_drivers and simulate_scenario are only meaningful
+    for series whose selected model is global_gbm -- both branches
+    (available series, and the clean error on a non-GBM series) are
+    exercised here."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        sel = json.loads((REPORTS / "selected_model.json").read_text())
+        cls.gbm_series = [k for k, v in sel.items() if v == "global_gbm"]
+        cls.non_gbm_series = [k for k, v in sel.items() if v != "global_gbm"]
+
+    def test_explain_forecast_drivers_on_gbm_series(self):
+        if not self.gbm_series:
+            self.skipTest("no global_gbm series in this run's selected_model.json")
+        from src.agent import tool_explain_forecast_drivers
+        store, dept = int(self.gbm_series[0][1:3]), int(self.gbm_series[0][-2:])
+        result = tool_explain_forecast_drivers(store=store, dept=dept, week_ahead=1)
+        self.assertNotIn("error", result)
+        self.assertIn("top_drivers", result)
+        self.assertGreater(len(result["top_drivers"]), 0)
+        self.assertIn("method", result)  # explicitly documents occlusion-not-SHAP -- see src/explain.py
+
+    def test_explain_forecast_drivers_errors_cleanly_on_non_gbm_series(self):
+        if not self.non_gbm_series:
+            self.skipTest("no non-global_gbm series in this run's selected_model.json")
+        from src.agent import tool_explain_forecast_drivers
+        store, dept = int(self.non_gbm_series[0][1:3]), int(self.non_gbm_series[0][-2:])
+        result = tool_explain_forecast_drivers(store=store, dept=dept)
+        self.assertIn("error", result)
+
+    def test_simulate_scenario_on_gbm_series(self):
+        if not self.gbm_series:
+            self.skipTest("no global_gbm series in this run's selected_model.json")
+        from src.agent import tool_simulate_scenario
+        store, dept = int(self.gbm_series[0][1:3]), int(self.gbm_series[0][-2:])
+        result = tool_simulate_scenario(store=store, dept=dept, markdown_active=True, weeks=3)
+        self.assertNotIn("error", result)
+        self.assertEqual(len(result["scenario_forecast"]), 3)
+        self.assertEqual(len(result["delta_vs_baseline"]), 3)
+
+    def test_simulate_scenario_errors_cleanly_on_non_gbm_series(self):
+        if not self.non_gbm_series:
+            self.skipTest("no non-global_gbm series in this run's selected_model.json")
+        from src.agent import tool_simulate_scenario
+        store, dept = int(self.non_gbm_series[0][1:3]), int(self.non_gbm_series[0][-2:])
+        result = tool_simulate_scenario(store=store, dept=dept, markdown_active=True)
+        self.assertIn("error", result)
+
 
 @unittest.skipUnless((REPORTS / "current_forecasts.csv").exists(),
                       "run scripts/run_pipeline.py first to generate reports/ artifacts")
@@ -71,11 +134,86 @@ class TestMockLLMRouting(unittest.TestCase):
         trace = ask("store 6 dept 4")
         self.assertEqual(trace.steps[0]["tool"], "get_forecast")
 
+    def test_routes_what_if_question_to_simulate_scenario(self):
+        from src.agent import ask
+        trace = ask("What if store 1 dept 2 ran a markdown promotion for 3 weeks?")
+        self.assertEqual(trace.steps[0]["tool"], "simulate_scenario")
+        self.assertEqual(trace.steps[0]["args"]["markdown_active"], True)
+        self.assertIsNone(trace.steps[0]["args"]["is_holiday"])  # not mentioned -> preserve real calendar
+        self.assertEqual(trace.steps[0]["args"]["weeks"], 3)
+
+    def test_what_if_holiday_wording_sets_explicit_override(self):
+        from src.agent import ask
+        trace = ask("What if store 1 dept 2 were a holiday week?")
+        self.assertEqual(trace.steps[0]["tool"], "simulate_scenario")
+        self.assertEqual(trace.steps[0]["args"]["is_holiday"], True)
+
+    def test_routes_driver_question_to_explain_forecast_drivers(self):
+        from src.agent import ask
+        trace = ask("What features are driving the forecast for store 1 dept 2?")
+        self.assertEqual(trace.steps[0]["tool"], "explain_forecast_drivers")
+        self.assertEqual(trace.steps[0]["args"]["store"], 1)
+        self.assertEqual(trace.steps[0]["args"]["dept"], 2)
+
     def test_every_answer_has_a_logged_trace_step(self):
         from src.agent import ask
         trace = ask("Why did store 1 dept 1 change?")
         self.assertGreaterEqual(len(trace.steps), 1)
         self.assertTrue(trace.final_answer)
+
+
+class TestBackendSelection(unittest.TestCase):
+    """No network calls here -- just the env-var dispatch logic in
+    get_llm_backend(), and the OpenAI tool-spec shape conversion. Real
+    calls to either provider are exercised manually (see README) with a
+    live API key, not in the test suite."""
+
+    def test_defaults_to_mock_with_no_keys(self):
+        from src.agent import get_llm_backend, MockLLM
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsInstance(get_llm_backend(), MockLLM)
+
+    def test_prefers_anthropic_when_only_that_key_present(self):
+        from src.agent import get_llm_backend, AnthropicLLM
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test-fake"}, clear=True):
+            self.assertIsInstance(get_llm_backend(), AnthropicLLM)
+
+    def test_uses_openai_when_only_that_key_present(self):
+        from src.agent import get_llm_backend, OpenAILLM
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test-fake"}, clear=True):
+            backend = get_llm_backend()
+            self.assertIsInstance(backend, OpenAILLM)
+            self.assertEqual(backend.model, "gpt-4o-mini")
+
+    def test_anthropic_takes_precedence_when_both_keys_present(self):
+        from src.agent import get_llm_backend, AnthropicLLM
+        env = {"ANTHROPIC_API_KEY": "sk-test-fake", "OPENAI_API_KEY": "sk-test-fake"}
+        with patch.dict("os.environ", env, clear=True):
+            self.assertIsInstance(get_llm_backend(), AnthropicLLM)
+
+    def test_llm_backend_env_var_forces_openai_even_with_anthropic_key_present(self):
+        from src.agent import get_llm_backend, OpenAILLM
+        env = {"ANTHROPIC_API_KEY": "sk-test-fake", "OPENAI_API_KEY": "sk-test-fake", "LLM_BACKEND": "openai"}
+        with patch.dict("os.environ", env, clear=True):
+            self.assertIsInstance(get_llm_backend(), OpenAILLM)
+
+    def test_openai_model_override_via_env_var(self):
+        from src.agent import get_llm_backend, OpenAILLM
+        env = {"OPENAI_API_KEY": "sk-test-fake", "OPENAI_MODEL": "gpt-4o"}
+        with patch.dict("os.environ", env, clear=True):
+            backend = get_llm_backend()
+            self.assertIsInstance(backend, OpenAILLM)
+            self.assertEqual(backend.model, "gpt-4o")
+
+    def test_openai_tool_specs_match_shared_tool_registry(self):
+        from src.agent import _to_openai_tool_specs, TOOLS
+        specs = _to_openai_tool_specs()
+        names = {s["function"]["name"] for s in specs}
+        self.assertEqual(names, set(TOOLS.keys()))
+        for s in specs:
+            self.assertEqual(s["type"], "function")
+            self.assertIn("parameters", s["function"])
+            self.assertEqual(s["function"]["parameters"]["type"], "object")
 
 
 if __name__ == "__main__":

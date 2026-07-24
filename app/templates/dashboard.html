@@ -100,6 +100,7 @@
           <span><i class="swatch" style="background:var(--series-1)"></i>Actuals</span>
           <span><i class="swatch" style="background:var(--series-2); background-image:repeating-linear-gradient(90deg,var(--series-2) 0 4px,transparent 4px 7px);"></i>Forecast</span>
           <span><i class="dot-swatch" style="background:var(--critical)"></i>Flagged anomaly</span>
+          <span><i class="swatch" style="background:var(--series-2); opacity:0.3; height:8px; border-radius:2px;"></i>80% prediction interval</span>
         </div>
       </div>
 
@@ -123,6 +124,29 @@
         <h2>Flagged anomalies (this series)</h2>
         <table id="anomalyTable"><thead><tr><th>Date</th><th>Value</th><th>Type</th></tr></thead><tbody></tbody></table>
       </div>
+
+      <div id="gbmOnlyNotice" class="card legend-note" style="margin-top:16px; display:none;"></div>
+
+      <div class="card" id="driverCardBody" style="margin-top:16px;">
+        <h2>What's driving week-1's forecast</h2>
+        <div class="chart-wrap" id="driverChart"></div>
+        <div class="legend-note">Occlusion-based local attribution (median-replacement per feature) —
+          not SHAP, see docs/ARCHITECTURE.md. Green = pushed the forecast up vs. a "typical" week; red = pushed it down.</div>
+      </div>
+
+      <div class="card" id="scenarioCardBody" style="margin-top:16px;">
+        <h2>What-if simulator</h2>
+        <div class="controls" style="margin-bottom:10px;">
+          <label><input type="checkbox" id="scenarioMarkdown" /> Active markdown promo</label>
+          <label><input type="checkbox" id="scenarioHoliday" /> Treat as holiday</label>
+          <label>Weeks <input type="text" id="scenarioWeeks" value="4" style="width:36px;" /></label>
+          <button onclick="runScenario()">Run scenario</button>
+        </div>
+        <div id="scenarioResult" style="font-size:12.5px; line-height:1.7;"></div>
+        <div class="legend-note">Recomputes the global GBM recursively under the hypothetical covariates above and
+          compares to the baseline forecast — the one tool here that genuinely recomputes rather than reading a
+          precomputed artifact (see src/scenario.py).</div>
+      </div>
     </div>
   </div>
 
@@ -141,13 +165,14 @@ function svgEl(tag, attrs) {
   return el;
 }
 
-function renderLineChart(containerId, { labels, series, anomalyIdx, width = 640, height = 260 }) {
+function renderLineChart(containerId, { labels, series, anomalyIdx, band, width = 640, height = 260 }) {
   const container = document.getElementById(containerId);
   container.innerHTML = "";
   const padL = 54, padR = 14, padT = 14, padB = 28;
   const plotW = width - padL - padR, plotH = height - padT - padB;
 
-  const allVals = series.flatMap(s => s.points.filter(v => v != null));
+  const bandVals = (band ? band.points.filter(p => p != null).flatMap(p => [p.low, p.high]) : []);
+  const allVals = series.flatMap(s => s.points.filter(v => v != null)).concat(bandVals);
   const yMax = Math.max(...allVals) * 1.08;
   const yMin = Math.min(0, Math.min(...allVals));
   const n = labels.length;
@@ -155,6 +180,19 @@ function renderLineChart(containerId, { labels, series, anomalyIdx, width = 640,
   const yAt = v => padT + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
 
   const svg = svgEl("svg", { width, height, viewBox: `0 0 ${width} ${height}`, style: "max-width:100%; display:block;" });
+
+  // 80% prediction interval band (drawn first, under the gridlines/lines)
+  if (band) {
+    const pts = band.points.map((p, i) => (p == null ? null : { i, ...p }));
+    let d = "";
+    const present = pts.filter(p => p != null);
+    if (present.length) {
+      d += "M" + present.map(p => `${xAt(p.i)},${yAt(p.high)}`).join(" L");
+      d += " L" + present.slice().reverse().map(p => `${xAt(p.i)},${yAt(p.low)}`).join(" L");
+      d += " Z";
+      svg.appendChild(svgEl("path", { d, fill: band.color || "#eb6834", "fill-opacity": 0.14, stroke: "none" }));
+    }
+  }
 
   // gridlines + y ticks
   const ticks = 5;
@@ -220,6 +258,10 @@ function renderLineChart(containerId, { labels, series, anomalyIdx, width = 640,
       const v = s.points[i];
       if (v != null) lines.push(`${s.label}: $${Math.round(v).toLocaleString()}`);
     });
+    if (band && band.points[i] != null) {
+      const p = band.points[i];
+      lines.push(`80% interval: $${Math.round(p.low).toLocaleString()} – $${Math.round(p.high).toLocaleString()}`);
+    }
     tooltip.innerHTML = lines.join("<br/>");
     const px = (xAt(i) / width) * rect.width;
     tooltip.style.left = px + "px";
@@ -273,6 +315,49 @@ function renderBarChart(containerId, { categories, values, colors, yLabel, width
   container.appendChild(svg);
 }
 
+// Horizontal diverging bar chart for signed values (occlusion-based
+// feature impacts can push the forecast up OR down) -- bars grow left or
+// right from a center zero-line, one row per feature.
+function renderDriverChart(containerId, { items, width = 320, height = 220 }) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (!items || !items.length) { container.innerHTML = '<div class="legend-note">No drivers to show.</div>'; return; }
+
+  const labelW = 92, padR = 46, padT = 8, padB = 8;
+  const rowH = Math.min(28, (height - padT - padB) / items.length);
+  const plotW = width - labelW - padR;
+  const cx = labelW + plotW / 2;
+  const maxAbs = Math.max(...items.map(d => Math.abs(d.impact)), 1);
+  const xAt = v => cx + (v / maxAbs) * (plotW / 2 - 4);
+
+  const svg = svgEl("svg", { width, height: rowH * items.length + padT + padB,
+    viewBox: `0 0 ${width} ${rowH * items.length + padT + padB}`, style: "max-width:100%; display:block;" });
+  svg.appendChild(svgEl("line", { x1: cx, x2: cx, y1: padT, y2: rowH * items.length + padT, stroke: "#c3c2b7", "stroke-width": 1 }));
+
+  items.forEach((d, i) => {
+    const y = padT + i * rowH;
+    const label = svgEl("text", { x: labelW - 8, y: y + rowH / 2 + 4, "text-anchor": "end", "font-size": 10.5,
+      fill: "#52514e", "font-family": "system-ui,sans-serif" });
+    label.textContent = d.feature;
+    svg.appendChild(label);
+
+    const barX = Math.min(cx, xAt(d.impact));
+    const barW = Math.abs(xAt(d.impact) - cx);
+    const rect = svgEl("rect", { x: barX, y: y + 4, width: Math.max(barW, 1), height: rowH - 8, rx: 3, ry: 3,
+      fill: d.impact >= 0 ? "#1baf7a" : "#d03b3b" });
+    svg.appendChild(rect);
+
+    const valLabel = svgEl("text", {
+      x: d.impact >= 0 ? xAt(d.impact) + 5 : xAt(d.impact) - 5,
+      y: y + rowH / 2 + 4, "text-anchor": d.impact >= 0 ? "start" : "end", "font-size": 10,
+      fill: "#0b0b0b", "font-family": "system-ui,sans-serif", "font-weight": 600,
+    });
+    valLabel.textContent = (d.impact >= 0 ? "+" : "") + Math.round(d.impact).toLocaleString();
+    svg.appendChild(valLabel);
+  });
+  container.appendChild(svg);
+}
+
 // ---------------------------------------------------------------------
 // Data wiring
 // ---------------------------------------------------------------------
@@ -320,6 +405,9 @@ async function loadChart() {
   const histData = [...hist.map(h => h.value), ...fc.forecast.map(() => null)];
   const fcData = new Array(hist.length - 1).fill(null).concat([hist[hist.length-1].value], fc.forecast.map(f => f.value));
   const anomalyIdx = hist.map((h, i) => h.needs_investigation ? i : -1).filter(i => i >= 0);
+  const bandPoints = new Array(hist.length).fill(null).concat(
+    fc.forecast.map(f => (f.low != null && f.high != null) ? { low: f.low, high: f.high } : null)
+  );
 
   renderLineChart('mainChart', {
     labels,
@@ -328,7 +416,63 @@ async function loadChart() {
       { label: 'Forecast', color: seriesColors.series2, points: fcData, dashed: true },
     ],
     anomalyIdx,
+    band: { points: bandPoints, color: seriesColors.series2 },
   });
+
+  await loadDriversAndScenario(fc.model_used);
+}
+
+// Drivers + what-if panel are only meaningful when the selected model is
+// the global GBM (see docs/ARCHITECTURE.md + src/explain.py, src/scenario.py
+// for why classical models have neither per-feature attribution nor
+// covariate slots to hypothetically change) -- the panel says so plainly
+// rather than showing a broken/empty chart.
+async function loadDriversAndScenario(modelUsed) {
+  const notice = document.getElementById('gbmOnlyNotice');
+  const driverCard = document.getElementById('driverCardBody');
+  const scenarioCard = document.getElementById('scenarioCardBody');
+  if (modelUsed !== 'global_gbm') {
+    notice.style.display = 'block';
+    notice.textContent = `This series' selected model is ${modelUsed}, a classical method with no ` +
+      `per-feature model to explain and no markdown/holiday covariates to simulate -- drivers and ` +
+      `what-if scenarios are only available for series where the global GBM won the backtest.`;
+    driverCard.style.display = 'none';
+    scenarioCard.style.display = 'none';
+    return;
+  }
+  notice.style.display = 'none';
+  driverCard.style.display = 'block';
+  scenarioCard.style.display = 'block';
+
+  const drivers = await fetchJSON(`/api/explain?store=${currentStore}&dept=${currentDept}&week_ahead=1`);
+  if (drivers.top_drivers) {
+    renderDriverChart('driverChart', { items: drivers.top_drivers.map(d => ({ feature: d.feature, impact: d.impact })) });
+  }
+}
+
+async function runScenario() {
+  const markdownActive = document.getElementById('scenarioMarkdown').checked;
+  const holidayCheckbox = document.getElementById('scenarioHoliday');
+  // tri-state: unchecked+untouched -> don't override (keep real calendar).
+  // We approximate this with a simple checkbox (override to true when
+  // checked) since a browser checkbox has no native "unset" state -- see
+  // the note rendered under the control.
+  const isHoliday = holidayCheckbox.checked ? true : null;
+  const weeks = parseInt(document.getElementById('scenarioWeeks').value) || 4;
+
+  const params = new URLSearchParams({
+    store: currentStore, dept: currentDept, markdown_active: markdownActive, weeks,
+  });
+  if (isHoliday !== null) params.set('is_holiday', isHoliday);
+
+  const result = await fetchJSON(`/api/simulate?${params.toString()}`);
+  const out = document.getElementById('scenarioResult');
+  if (result.error) { out.textContent = result.error; return; }
+  out.innerHTML = result.scenario_forecast.map((s, i) =>
+    `week ${i + 1}: baseline $${result.baseline_forecast[i].toLocaleString()} → scenario $${s.toLocaleString()} ` +
+    `(<b style="color:${result.delta_vs_baseline[i] >= 0 ? '#0ca30c' : '#d03b3b'}">` +
+    `${result.delta_vs_baseline[i] >= 0 ? '+' : ''}${result.delta_vs_baseline[i].toLocaleString()}</b>)`
+  ).join('<br/>');
 }
 
 async function loadAnomalyTable() {

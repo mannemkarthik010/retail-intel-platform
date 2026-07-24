@@ -17,4 +17,12 @@ RUN python data/generate_data.py \
     && python scripts/run_monitoring_sim.py
 
 EXPOSE 8000
+
+# The Flask dev server is fine for this demo but prints its own "do not use
+# in production" warning. For real deployment, swap in gunicorn instead --
+# not validated end-to-end in the sandbox this image was built in (pip
+# installs beyond a pre-cached set were blocked there), so it's documented
+# here rather than silently swapped in unverified:
+#   RUN pip install --no-cache-dir gunicorn
+#   CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8000", "app.server:app"]
 CMD ["python", "app/server.py"]

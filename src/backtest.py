@@ -50,13 +50,18 @@ def rmse(y_true, y_pred):
     return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
 
-def _recursive_gbm_forecast(model: fc.GlobalGBMModel, series_hist: pd.DataFrame,
-                             future_covariates: pd.DataFrame, horizon: int) -> np.ndarray:
+def _recursive_gbm_forecast_with_rows(model: fc.GlobalGBMModel, series_hist: pd.DataFrame,
+                                       future_covariates: pd.DataFrame, horizon: int):
     """Forecast `horizon` steps ahead for ONE series, feeding predictions back
-    in as lag features (since we don't know future actuals)."""
+    in as lag features (since we don't know future actuals). Also returns
+    the exact single-row feature DataFrame used to produce each step's
+    prediction, so callers that need to explain a SPECIFIC horizon step
+    (src/explain.py's occlusion attribution) can do so for any week_ahead,
+    not just the first."""
     history = series_hist.sort_values("Date")
     sales_hist = list(history["Weekly_Sales"].values)
     preds = []
+    rows = []
     for h in range(horizon):
         cov_row = future_covariates.iloc[[h]].copy()
         arr = np.array(sales_hist)
@@ -67,9 +72,18 @@ def _recursive_gbm_forecast(model: fc.GlobalGBMModel, series_hist: pd.DataFrame,
             cov_row[f"rollmean_{w}"] = window.mean() if len(window) else np.nan
             cov_row[f"rollstd_{w}"] = window.std() if len(window) else 0.0
         pred = float(model.predict(cov_row)[0])
+        rows.append(cov_row)
         preds.append(pred)
         sales_hist.append(pred)
-    return np.array(preds)
+    return np.array(preds), rows
+
+
+def _recursive_gbm_forecast(model: fc.GlobalGBMModel, series_hist: pd.DataFrame,
+                             future_covariates: pd.DataFrame, horizon: int) -> np.ndarray:
+    """Forecast `horizon` steps ahead for ONE series, feeding predictions back
+    in as lag features (since we don't know future actuals)."""
+    preds, _ = _recursive_gbm_forecast_with_rows(model, series_hist, future_covariates, horizon)
+    return preds
 
 
 @dataclass

@@ -2,7 +2,7 @@
 
 **Forecasting + anomaly detection + a tool-calling agent with a full audit trail, for a simulated multi-store retail chain — built to demonstrate senior ML/AI engineering practice, not tutorial-following.**
 
-![tests](https://img.shields.io/badge/tests-23%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-49%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF)
 ![docker](https://img.shields.io/badge/docker-ready-2496ED)
@@ -19,7 +19,11 @@
 
 - **Every number in the docs is real, not cherry-picked** — the gradient-boosted model beats seasonal-naive by less than half a point of WAPE and only wins 140/240 series; the report says so instead of rounding up. See `docs/EVAL_REPORT.md`.
 - **A real bug, found and fixed, is documented rather than hidden** — an early version of the anomaly detector mislabeled December holiday spikes as anomalies; the fix and the before/after numbers are in the eval report.
+- **Forecasts ship with an 80% prediction interval, and the interval's own coverage is honestly measured** — a held-out check reports 74.7% actual coverage vs. 80% nominal, not asserted-and-forgotten. See `docs/EVAL_REPORT.md` §4.
+- **Explainability without SHAP, disclosed as an approximation, not passed off as SHAP** — occlusion-based local attribution + permutation-importance global ranking, since `shap` wasn't installable in this build sandbox. See `src/explain.py`.
+- **A genuine what-if simulator, clearly separated from the read-only tools** — `simulate_scenario` recomputes the forecast under a hypothetical markdown/holiday live, rather than reading a precomputed CSV like every other agent tool does.
 - **Every agent answer carries a full audit trail** — not just "trust the AI," but which tool it called, with what arguments, and why (`reports/agent_traces.jsonl`).
+- **The LLM backend is a swappable brain, not a hard-coded vendor call** — a deterministic mock by default, with real tool-calling loops against both Anthropic and OpenAI (whichever API key is present), sharing one tool registry and trace format. Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or both plus `LLM_BACKEND=openai|anthropic` to force one.
 - **Mapped explicitly to five real job descriptions** it was built against (Merciv, Uber Freight, Sigma, Confido, Condor) — see `docs/JOB_MAPPING.md` for the requirement-by-requirement crosswalk.
 - **Runs in one command** — `docker build -t retail-intel . && docker run -p 8000:8000 retail-intel` — with CI (`.github/workflows/tests.yml`) running the full pipeline and test suite on every push.
 
@@ -39,13 +43,21 @@ simulated, and what's a known limitation.
    explicitly separating out spikes that are already explained by an active
    promotion or a known calendar holiday, so it doesn't cry wolf on things a
    human would immediately recognize as normal.
-3. **Answers natural-language questions** ("why did store 4 dept 8 change
+3. **Quantifies its own uncertainty and explains its own reasoning** — every
+   forecast ships an 80% prediction interval with honestly-measured
+   coverage, and any series where the gradient-boosted model won can be
+   explained (which features drove this specific number) or interrogated
+   with a live what-if ("what if we ran a markdown promo these next 3
+   weeks?").
+4. **Answers natural-language questions** ("why did store 4 dept 8 change
    recently?", "what are the biggest declines?") through a small tool-calling
    agent, with a full reasoning/audit trail behind every answer.
-4. **Monitors itself** — a drift-detection pass that watches whether each
+5. **Monitors itself** — a drift-detection pass that watches whether each
    series' *deployed* model is still performing, and flags individual series
    for a retraining review even when the fleet-wide average looks fine.
-5. Serves all of this through a **Flask API + browser dashboard**.
+6. Serves all of this through a **Flask API + browser dashboard**, with the
+   forecast chart shading its own confidence band and dedicated panels for
+   feature drivers and the what-if simulator.
 
 ## Quickstart
 
@@ -90,11 +102,14 @@ python app/server.py
 
 ```
 data/               synthetic data generator + generated CSVs + ground-truth event log
-src/                 the actual pipeline: features, forecasting, backtest, anomaly, agent
+src/                 the actual pipeline: features, forecasting, backtest, anomaly, agent,
+                     intervals (prediction intervals), explain (occlusion/permutation
+                     importance), scenario (what-if simulation)
 scripts/             orchestration entry points (pipeline, monitoring sim, figures, demo assets)
 app/                 Flask API + HTML/JS dashboard (zero external JS dependencies)
 tests/               unittest suite (pytest wasn't installable in the build sandbox)
-reports/             generated artifacts: metrics CSVs, figures, agent trace log
+reports/             generated artifacts: metrics CSVs, figures, agent trace log,
+                     interval_coverage.json, feature_importance.json, models/*.joblib
 docs/                ARCHITECTURE.md, EVAL_REPORT.md, DATA_PROVENANCE.md, JOB_MAPPING.md, polished report
 .github/workflows/   CI: runs the full pipeline + test suite + API smoke test on every push
 Dockerfile           one-command reproducible run

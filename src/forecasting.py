@@ -119,3 +119,43 @@ class GlobalGBMModel:
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         return np.clip(self.model.predict(df[feat.FEATURE_COLUMNS]), 0, None)
+
+
+@dataclass
+class QuantileGBMModel:
+    """Same architecture as GlobalGBMModel but trained with pinball
+    (quantile) loss instead of squared error, so it estimates a specific
+    quantile of the conditional demand distribution rather than the mean.
+    Used in pairs (e.g. q=0.1 and q=0.9) to produce an 80% prediction
+    interval around the point forecast -- see src/intervals.py for how the
+    interval is actually assembled and validated.
+
+    Honest limitation: when used recursively (see intervals.py) it's
+    queried along the POINT model's own recursive path rather than
+    re-branching a full quantile recursion tree. The interval therefore
+    reflects one-step-ahead conditional uncertainty propagated along a
+    single trajectory, not the (wider, more correct) uncertainty of a truly
+    recursive quantile forecast. A production system would Monte-Carlo
+    sample multiple recursive paths or use a proper multi-step conformal
+    method; this is a documented, honest approximation instead."""
+    model: HistGradientBoostingRegressor
+    quantile: float
+
+    @classmethod
+    def fit(cls, train_df: pd.DataFrame, quantile: float):
+        X = train_df[feat.FEATURE_COLUMNS]
+        y = train_df[feat.TARGET_COLUMN]
+        model = HistGradientBoostingRegressor(
+            loss="quantile",
+            quantile=quantile,
+            max_depth=6,
+            learning_rate=0.08,
+            max_iter=250,
+            l2_regularization=0.1,
+            random_state=42,
+        )
+        model.fit(X, y)
+        return cls(model=model, quantile=quantile)
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return np.clip(self.model.predict(df[feat.FEATURE_COLUMNS]), 0, None)

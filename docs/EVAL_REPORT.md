@@ -130,7 +130,71 @@ fleet level: "the average looks fine" and "every individual series is fine"
 are different claims, and only checking the first one is how a production
 system quietly lets a handful of series go stale.
 
-## 4. What a next iteration would change
+## 4. Prediction intervals: are the 80% bands actually calibrated?
+
+Every forecast now ships with an 80% interval (`forecast_low`/`forecast_high`
+in `reports/current_forecasts.csv`), not just a point number — see
+`src/intervals.py` for the two methods (quantile-GBM for global_gbm series,
+RMSE-normal-approximation for seasonal_naive/Holt-Winters). The honest
+question for any prediction interval is whether it's actually calibrated,
+so `scripts/run_pipeline.py` runs a held-out check every time it runs
+(refit on data strictly before the most recent backtest cutoff, then check
+what fraction of the real, never-trained-on future values land inside the
+band) and writes the real number to `reports/interval_coverage.json`:
+
+| Selected model | Empirical coverage | Nominal target |
+|---|---|---|
+| seasonal_naive | 77.5% | 80% |
+| global_gbm | 73.0% | 80% |
+| holt_winters | 72.5% | 80% |
+| **Overall** | **74.7%** | **80%** |
+
+**Reading this honestly:** the bands are a bit too narrow across the board
+— real coverage runs 5-8 points below the 80% nominal target, meaning the
+true value falls outside the interval somewhat more often than the method
+implies. This is a real, measured miscalibration, not a hidden one, and it
+has a plausible cause for each method: the RMSE-normal band assumes
+constant, Gaussian error variance across the whole 8-week horizon, when
+real forecast error typically grows with the number of weeks out (a flat
+band under-covers the later weeks and over-covers the earlier ones); the
+GBM quantile band is queried along the point model's own single recursive
+path rather than branching a full recursive quantile tree, which
+understates how much uncertainty compounds recursively (see
+`QuantileGBMModel`'s docstring in `src/forecasting.py`). A next iteration
+would widen the bands with a small calibration multiplier fit against this
+same held-out check, or move to a proper conformal-prediction method that
+calibrates by construction instead of by assumption.
+
+## 5. Forecast-driver explainability
+
+`shap` could not be installed in this build sandbox (see
+`docs/ARCHITECTURE.md`), so `src/explain.py` implements two disclosed
+substitutes: occlusion-based local attribution (per-forecast, per-feature,
+via median-replacement) and `sklearn.inspection.permutation_importance`
+for a real, standard global ranking. The global ranking, computed on a
+6,000-row sample of the training table (`reports/feature_importance.json`):
+
+| Feature | Permutation importance (MAE increase) |
+|---|---|
+| rollmean_4 | 6,560.9 |
+| lag_1 | 5,458.9 |
+| IsHoliday | 1,615.2 |
+| lag_52 | 1,607.2 |
+| rollmean_12 | 532.8 |
+| rollmean_8 | 450.7 |
+
+**Reading this honestly:** the model leans heavily on recent short-window
+history (`rollmean_4`, `lag_1`) — unsurprising for a demand series, but it
+means the model is closer to "a well-regularized recent-average" than to
+"a rich, holiday/promo-driven understanding of demand" for most series;
+`IsHoliday` and `lag_52` (the same week last year) matter, but roughly a
+third as much. This ranking is computed **in-sample** (the final serving
+model is trained on all available history, so there's no leftover
+held-out slice to score against without shrinking training data) —
+disclosed as a limitation in `src/explain.py`'s docstring rather than
+presented as a held-out result.
+
+## 6. What a next iteration would change
 
 - Fit Holt-Winters smoothing constants via MLE (statsmodels) instead of a
   small fixed grid, closing most of its gap to the other two models.
