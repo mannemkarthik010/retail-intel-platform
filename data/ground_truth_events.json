@@ -1,0 +1,13 @@
+{
+  "disruption_store":4,
+  "disruption_dept":8,
+  "disruption_start":"2021-09-12",
+  "disruption_weeks":5,
+  "covid_start":"2020-03-08",
+  "covid_crash_end":"2020-05-03",
+  "covid_recover_end":"2020-08-30",
+  "n_stores":20,
+  "n_depts":12,
+  "n_weeks":260,
+  "n_rows":62400
+}

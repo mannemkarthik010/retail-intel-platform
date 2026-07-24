@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.DS_Store
+*.log
+
+# polished report -- kept out of version control intentionally; being
+# revised before it's added back in
+docs/*.docx
+docs/*.pdf

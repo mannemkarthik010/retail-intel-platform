@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.git/
+.github/
+docs/*.docx
+docs/*.pdf
+reports/figures/*.gif

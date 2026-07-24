@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate the (synthetic) dataset
+        run: python data/generate_data.py
+
+      - name: Run the offline pipeline (backtest + anomaly scan + forecasts)
+        run: python scripts/run_pipeline.py
+
+      - name: Run the monitoring simulation
+        run: python scripts/run_monitoring_sim.py
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Smoke-test the API
+        run: |
+          python app/server.py &
+          sleep 3
+          curl -sf http://localhost:8000/api/health
+          curl -sf "http://localhost:8000/api/forecast?store=1&dept=1" | grep -q forecast

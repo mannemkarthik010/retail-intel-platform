@@ -1,0 +1,26 @@
+# Core
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+matplotlib>=3.7
+
+# Serving
+flask>=3.0
+
+# Agent (real LLM backend, optional -- only needed if ANTHROPIC_API_KEY is set)
+requests>=2.31
+
+# Dev / testing
+# (pytest is the standard choice; this repo's test suite also runs fine with
+#  the stdlib `unittest` -- see docs/ARCHITECTURE.md for why)
+# pytest>=7.4
+
+# NOTE on substitutions made in this build environment:
+#   - statsmodels / lightgbm / fastapi could not be installed here (outbound
+#     package installs beyond the pre-cached set were blocked). This repo
+#     uses sklearn.HistGradientBoostingRegressor in place of LightGBM (same
+#     algorithm family: histogram-based gradient boosting) and Flask in
+#     place of FastAPI (same REST semantics, no async). Swapping either
+#     back in touches only src/forecasting.py (model class) or app/server.py
+#     (routing syntax) -- nothing else depends on the specific library.

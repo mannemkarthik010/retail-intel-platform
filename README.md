@@ -1,0 +1,120 @@
+# Retail Demand Intelligence Platform
+
+**Forecasting + anomaly detection + a tool-calling agent with a full audit trail, for a simulated multi-store retail chain — built to demonstrate senior ML/AI engineering practice, not tutorial-following.**
+
+![tests](https://img.shields.io/badge/tests-23%20passing-brightgreen)
+![python](https://img.shields.io/badge/python-3.11-blue)
+![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF)
+![docker](https://img.shields.io/badge/docker-ready-2496ED)
+![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![deps](https://img.shields.io/badge/dashboard-zero%20external%20JS-1BAF7A)
+
+> Once this is pushed to GitHub, point the CI badge at `https://github.com/<you>/<repo>/actions/workflows/tests.yml/badge.svg` so it goes live instead of static.
+
+![Dashboard demo](reports/figures/dashboard_demo.gif)
+
+*Live interaction: load a series, ask the agent a question in plain English, expand the audit trail to see exactly which tool it called and why. No Chart.js, no CDN — the charts are hand-rolled SVG.*
+
+## Why this isn't just another forecasting notebook
+
+- **Every number in the docs is real, not cherry-picked** — the gradient-boosted model beats seasonal-naive by less than half a point of WAPE and only wins 140/240 series; the report says so instead of rounding up. See `docs/EVAL_REPORT.md`.
+- **A real bug, found and fixed, is documented rather than hidden** — an early version of the anomaly detector mislabeled December holiday spikes as anomalies; the fix and the before/after numbers are in the eval report.
+- **Every agent answer carries a full audit trail** — not just "trust the AI," but which tool it called, with what arguments, and why (`reports/agent_traces.jsonl`).
+- **Mapped explicitly to five real job descriptions** it was built against (Merciv, Uber Freight, Sigma, Confido, Condor) — see `docs/JOB_MAPPING.md` for the requirement-by-requirement crosswalk.
+- **Runs in one command** — `docker build -t retail-intel . && docker run -p 8000:8000 retail-intel` — with CI (`.github/workflows/tests.yml`) running the full pipeline and test suite on every push.
+
+**This is not a notebook.** It's a pipeline (data → features → rolling-origin
+backtest → model selection → anomaly detection → agent tools → API → dashboard),
+with tests, a monitoring simulation, and an honest write-up of what's real, what's
+simulated, and what's a known limitation.
+
+## What it does
+
+1. **Forecasts** next-8-week demand for 240 store/department series, competing
+   three models (seasonal-naive, Holt-Winters, a global gradient-boosted model)
+   against each other via **rolling-origin backtesting** and picking a winner
+   *per series* — not a single train/test split, which can flatter or sink a
+   model purely by luck of which weeks land in the holdout.
+2. **Flags anomalies** — data-entry errors, unexplained demand shocks — while
+   explicitly separating out spikes that are already explained by an active
+   promotion or a known calendar holiday, so it doesn't cry wolf on things a
+   human would immediately recognize as normal.
+3. **Answers natural-language questions** ("why did store 4 dept 8 change
+   recently?", "what are the biggest declines?") through a small tool-calling
+   agent, with a full reasoning/audit trail behind every answer.
+4. **Monitors itself** — a drift-detection pass that watches whether each
+   series' *deployed* model is still performing, and flags individual series
+   for a retraining review even when the fleet-wide average looks fine.
+5. Serves all of this through a **Flask API + browser dashboard**.
+
+## Quickstart
+
+**Option A — Docker (one command):**
+
+```bash
+docker build -t retail-intel .
+docker run -p 8000:8000 retail-intel
+# then open http://localhost:8000
+```
+
+The image bakes data generation + the full backtest/anomaly/monitoring pipeline
+in at build time, so the container starts instantly with a reproducible,
+versioned snapshot of results — see the `Dockerfile`.
+
+**Option B — locally:**
+
+```bash
+pip install -r requirements.txt
+
+# 1. generate the (synthetic) dataset -- see docs/DATA_PROVENANCE.md
+python data/generate_data.py
+
+# 2. run the full offline pipeline: backtest, anomaly scan, forward forecasts
+python scripts/run_pipeline.py
+
+# 3. simulate production monitoring against the backtest history
+python scripts/run_monitoring_sim.py
+
+# 4. regenerate the report figures
+python scripts/make_report_figures.py
+
+# 5. run the tests
+python -m unittest discover -s tests -v
+
+# 6. start the API + dashboard
+python app/server.py
+# then open http://localhost:8000
+```
+
+## Repo layout
+
+```
+data/               synthetic data generator + generated CSVs + ground-truth event log
+src/                 the actual pipeline: features, forecasting, backtest, anomaly, agent
+scripts/             orchestration entry points (pipeline, monitoring sim, figures, demo assets)
+app/                 Flask API + HTML/JS dashboard (zero external JS dependencies)
+tests/               unittest suite (pytest wasn't installable in the build sandbox)
+reports/             generated artifacts: metrics CSVs, figures, agent trace log
+docs/                ARCHITECTURE.md, EVAL_REPORT.md, DATA_PROVENANCE.md, JOB_MAPPING.md, polished report
+.github/workflows/   CI: runs the full pipeline + test suite + API smoke test on every push
+Dockerfile           one-command reproducible run
+```
+
+## Key results (from the actual backtest, not cherry-picked)
+
+| Model | Mean WAPE (backtest) | Series won (of 240) |
+|---|---|---|
+| Global gradient-boosted model | 8.2% | 140 |
+| Seasonal-naive | 8.6% | 90 |
+| Holt-Winters (fixed-parameter) | 11.2% | 10 |
+
+Seasonal-naive winning 90/240 series is a real, honest result, not a bug — some
+series are dominated by strong, low-noise annual seasonality where "same week
+last year" is genuinely hard to beat. See `docs/EVAL_REPORT.md` for the full
+breakdown, limitations, and what a next iteration would change.
+
+## Using real data instead of the synthetic set
+
+See the module docstring in `data/generate_data.py` — the pipeline is fully
+schema-driven, so dropping in the real Walmart/M5/Favorita Kaggle CSVs (renamed
+to match the documented schema) requires no changes to `src/`.
