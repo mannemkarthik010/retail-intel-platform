@@ -638,16 +638,114 @@ class OpenAILLM:
         return "(hit max tool-call turns without a final answer)"
 
 
+def _to_bedrock_tool_config():
+    """Bedrock's Converse API wants the same JSON Schema everyone else here
+    uses, wrapped as {"toolSpec": {"name", "description", "inputSchema":
+    {"json": <schema>}}} inside a top-level {"tools": [...]}. Same shape
+    change as _to_openai_tool_specs() above -- no logic duplicated, just a
+    different envelope."""
+    return {
+        "tools": [
+            {"toolSpec": {
+                "name": spec["name"],
+                "description": spec["description"],
+                "inputSchema": {"json": spec["input_schema"]},
+            }}
+            for spec in TOOL_SPECS
+        ]
+    }
+
+
+# --------------------------------------------------------------------------
+# Backend 4: real Bedrock tool-calling loop via boto3's Converse API.
+# Activated automatically if BEDROCK_MODEL_ID is set in the environment (see
+# get_llm_backend() below for why that's the trigger instead of a generic
+# AWS credential check), or explicitly via LLM_BACKEND=bedrock.
+#
+# Unlike AnthropicLLM/OpenAILLM (plain HTTP, deliberately no vendor SDK --
+# see docs/ARCHITECTURE.md for why: proving provider-agnosticism across two
+# competing LLM vendors was the point there), this backend uses boto3. AWS
+# has no plain-HTTP-friendly equivalent to a bearer-token API key -- auth is
+# SigV4-signed requests, and boto3 is the standard, expected SDK for that
+# (and is needed anyway for the S3/Lambda/SageMaker calls elsewhere in
+# infra/). Requiring it here isn't a meaningful vendor lock-in concern the
+# way requiring anthropic's/openai's SDK would have been.
+# --------------------------------------------------------------------------
+class BedrockLLM:
+    name = "bedrock"
+
+    def __init__(self, model_id: str = None, region: str = None, max_turns: int = 4):
+        import boto3  # local import: only needed on this path, and only
+                       # ever reached when BEDROCK_MODEL_ID/LLM_BACKEND=bedrock
+                       # is explicitly set -- see module docstring above.
+        self.model_id = model_id or os.environ["BEDROCK_MODEL_ID"]
+        self.region = region or os.environ.get("AWS_REGION", "us-east-1")
+        self.max_turns = max_turns
+        self._client = boto3.client("bedrock-runtime", region_name=self.region)
+        self._tool_config = _to_bedrock_tool_config()
+
+    def _call(self, messages):
+        return self._client.converse(
+            modelId=self.model_id,
+            messages=messages,
+            system=[{"text": (
+                "You are a retail demand-forecasting analyst assistant. Use the "
+                "provided tools to answer questions about specific store/department "
+                "series. Always ground numeric claims in tool results, never guess."
+            )}],
+            toolConfig=self._tool_config,
+        )
+
+    def answer(self, question: str, trace: AgentTrace) -> str:
+        messages = [{"role": "user", "content": [{"text": question}]}]
+        for _ in range(self.max_turns):
+            result = self._call(messages)
+            message = result["output"]["message"]
+            content = message.get("content", [])
+            tool_uses = [b["toolUse"] for b in content if "toolUse" in b]
+            text_blocks = [b["text"] for b in content if "text" in b]
+            if not tool_uses:
+                return "\n".join(text_blocks) if text_blocks else "(no answer produced)"
+
+            messages.append(message)
+            tool_result_content = []
+            for tu in tool_uses:
+                fn = TOOLS.get(tu["name"])
+                args = tu.get("input", {})
+                out = fn(**args) if fn else {"error": f"unknown tool {tu['name']}"}
+                trace.log_step(tu["name"], args, out, reasoning="(reasoning happened inside the model; "
+                                                                  "this step is the tool call it chose to make)")
+                tool_result_content.append({
+                    "toolResult": {
+                        "toolUseId": tu["toolUseId"],
+                        "content": [{"json": out}],
+                    }
+                })
+            messages.append({"role": "user", "content": tool_result_content})
+        return "(hit max tool-call turns without a final answer)"
+
+
 def get_llm_backend():
     """Selection order: an explicit LLM_BACKEND override always wins;
     otherwise prefer whichever API key is present (Anthropic first, purely
-    because that's this project's primary integration target), falling
-    back to the deterministic mock so the system always runs."""
+    because that's this project's primary integration target; then OpenAI;
+    then Bedrock last among the real backends), falling back to the
+    deterministic mock so the system always runs.
+
+    Bedrock's auto-detection trigger is BEDROCK_MODEL_ID, not a generic AWS
+    credential check (e.g. AWS_ACCESS_KEY_ID) -- AWS credentials are
+    frequently present in an environment for unrelated infra reasons (S3
+    access, deployment tooling), so their mere presence isn't a reliable
+    signal that Bedrock should be the LLM brain. Deliberately setting
+    BEDROCK_MODEL_ID is the same kind of explicit, single-purpose signal
+    ANTHROPIC_API_KEY/OPENAI_API_KEY already are."""
     forced = os.environ.get("LLM_BACKEND", "").lower()
     if forced == "anthropic":
         return AnthropicLLM()
     if forced == "openai":
         return OpenAILLM()
+    if forced == "bedrock":
+        return BedrockLLM()
     if forced == "mock":
         return MockLLM()
 
@@ -655,6 +753,8 @@ def get_llm_backend():
         return AnthropicLLM()
     if os.environ.get("OPENAI_API_KEY"):
         return OpenAILLM()
+    if os.environ.get("BEDROCK_MODEL_ID"):
+        return BedrockLLM()
     return MockLLM()
 
 

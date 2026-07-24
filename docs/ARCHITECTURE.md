@@ -157,15 +157,24 @@ retraining a slightly different one on demand.
   Completions API, same plain-HTTP style, activated automatically when
   `OPENAI_API_KEY` is set instead. Model defaults to `gpt-4o-mini`,
   overridable via `OPENAI_MODEL`.
+- **`BedrockLLM`**: the same tool-calling loop again, this time against AWS
+  Bedrock's Converse API via `boto3`, activated automatically when
+  `BEDROCK_MODEL_ID` is set (deliberately not a generic AWS-credential
+  check — see `get_llm_backend()`'s own docstring for why). This is the one
+  backend that uses a vendor SDK rather than plain HTTP: AWS auth is
+  SigV4-signed, not a bearer token, and `boto3` is the standard SDK needed
+  anyway for the S3/Lambda/SageMaker calls in `infra/` — see
+  `infra/README.md` for the full AWS deployment this backend is part of.
 
 Swapping backends touches zero tool code and zero trace format — only which
 component decides which tool to call next. Selection order in
-`get_llm_backend()`: an explicit `LLM_BACKEND=anthropic|openai|mock`
+`get_llm_backend()`: an explicit `LLM_BACKEND=anthropic|openai|bedrock|mock`
 environment variable always wins; otherwise Anthropic is preferred if its key
-is present, then OpenAI, then the mock. This multi-provider pluggability
-directly answers Condor's job description, which names both "Anthropic
-Claude or OpenAI" as acceptable providers — a system that hard-codes one
-vendor's SDK into its tool-calling logic can't honor that requirement.
+is present, then OpenAI, then Bedrock, then the mock. This multi-provider
+pluggability directly answers Condor's job description, which names both
+"Anthropic Claude or OpenAI" (and SageMaker/Bedrock elsewhere in the same
+JD) as acceptable providers — a system that hard-codes one vendor's SDK
+into its tool-calling logic can't honor that requirement.
 
 Every call, real or mock, produces an **`AgentTrace`**: the question, each
 tool call with its arguments and result, and the final answer, persisted to
@@ -173,6 +182,21 @@ tool call with its arguments and result, and the final answer, persisted to
 explicitly in the Condor JD ("correctness and auditability are non-negotiable")
 generalized to any domain where "trust the AI's answer" needs to mean
 "and here's exactly how it got there."
+
+## AWS deployment
+
+`infra/` deploys this platform onto AWS using the exact services Condor's
+job description names — SageMaker (a nightly Processing Job runs the
+batch pipeline; an optional Serverless Inference endpoint serves the point
+GBM model), Bedrock (the fourth `src/agent.py` backend above), and Lambda
+(the API layer, behind API Gateway). It's real Terraform + real
+integration code, not a narrative description — but it was written in the
+same network-restricted sandbox as the rest of this project, so it hasn't
+been run against a live AWS account. See `infra/README.md` for the full
+architecture diagram, deployment steps, cost estimate, and — in the same
+spirit as the Docker/CI disclosure below — an explicit list of what's
+verified by a passing test run here versus what's "written to spec, not
+observed running."
 
 ## What's still a demo, not a production system
 

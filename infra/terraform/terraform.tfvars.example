@@ -1,0 +1,38 @@
+# Copy this to terraform.tfvars and fill in the values marked REQUIRED.
+# Everything else has a reasonable default -- see variables.tf for the full
+# description of each.
+
+project_name = "retail-intel"
+environment  = "dev"
+aws_region   = "us-east-1"
+
+# REQUIRED -- these ECR repos are created empty by this stack; build and
+# push the images (see infra/README.md) BEFORE the first `terraform apply`
+# that references them, or apply once to create the repos, push, then
+# apply again to create the Lambda/Processing Job wiring.
+api_lambda_image_uri           = "123456789012.dkr.ecr.us-east-1.amazonaws.com/retail-intel-dev-api:latest"
+sagemaker_processing_image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/retail-intel-dev-sagemaker-processing:latest"
+
+# Optional: LLM backend. Leave all three empty to run with the
+# deterministic MockLLM (see docs/ARCHITECTURE.md).
+# llm_backend       = "bedrock"
+# bedrock_model_id  = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+# anthropic_api_key = "sk-ant-..."   # better: leave unset here and run
+#                                    # `aws secretsmanager put-secret-value`
+#                                    # after apply instead of putting a real
+#                                    # key in a checked-in tfvars file
+# openai_api_key    = "sk-..."
+
+# Optional: nightly batch pipeline tuning.
+# batch_schedule_expression = "cron(0 3 * * ? *)"
+# sagemaker_instance_type   = "ml.m5.large"
+
+# Optional: Serverless Inference endpoint (off by default -- see
+# variables.tf's description for why this needs a packaged model artifact
+# to already exist before enabling it).
+# enable_sagemaker_serverless_endpoint  = true
+# sagemaker_sklearn_inference_image_uri = "246618743249.dkr.ecr.us-east-1.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+# model_data_s3_uri                     = "s3://retail-intel-dev-artifacts-xxxxxx/models/model.tar.gz"
+
+# Optional: alerting.
+# alarm_email = "you@example.com"

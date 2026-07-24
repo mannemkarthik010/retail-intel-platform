@@ -12,8 +12,9 @@ a project" interview answer.
 | Rolling-origin / backtesting, "best-fit selection" (Confido's exact phrase) | `src/backtest.py::run_backtest` — 6 cutoffs, per-series model selection |
 | Anomaly detection | `src/anomaly.py` — decomposition + robust z-score + IsolationForest cross-check |
 | Agentic AI architecture / multi-step reasoning over tools | `src/agent.py` — 6 tools (including live what-if simulation and driver explainability), pluggable planner, full trace |
-| RAG / LLM integration for natural-language interfaces | `src/agent.py::AnthropicLLM` / `OpenAILLM` — real tool-calling loops, activate automatically based on which API key is present |
-| "Providers such as Anthropic Claude or OpenAI" (Condor's exact phrase) | Both are implemented as interchangeable backends behind the same tool registry and trace format — see `docs/ARCHITECTURE.md` |
+| RAG / LLM integration for natural-language interfaces | `src/agent.py::AnthropicLLM` / `OpenAILLM` / `BedrockLLM` — real tool-calling loops, activate automatically based on which API key / model ID is present |
+| "Providers such as Anthropic Claude or OpenAI" (Condor's exact phrase) | All three are implemented as interchangeable backends behind the same tool registry and trace format — see `docs/ARCHITECTURE.md` |
+| SageMaker / Bedrock / Lambda (Condor's exact stack) | `infra/` — a nightly SageMaker Processing Job for the batch pipeline, an optional SageMaker Serverless Inference endpoint, `BedrockLLM` above, and a Lambda + API Gateway deployment of `app/server.py` — see `infra/README.md` for the architecture and what's honestly unverified |
 | "Systems enterprise users can actually trust" / interpretability (Merciv) | Every anomaly is labeled *why* (promo / holiday / genuinely unexplained); every agent answer carries its reasoning trace |
 | Uncertainty quantification / calibrated forecasts, not just point estimates (all five, implicitly) | `src/intervals.py` — 80% prediction intervals on every forecast, with a real held-out coverage check reported honestly (74.7% actual vs. 80% nominal) rather than assumed calibrated — see `docs/EVAL_REPORT.md` §4 |
 | Model interpretability / feature attribution (Merciv, Confido) | `src/explain.py` — occlusion-based local attribution + permutation-importance global ranking, both explicitly disclosed as SHAP-substitutes rather than passed off as SHAP |
@@ -39,10 +40,6 @@ is true:
 - **Knowledge graphs / GNNs** (Merciv's bonus points) — not attempted. A
   graph-RAG layer over the same forecast/anomaly data would be a natural
   extension, not a rebuild.
-- **AWS deployment** (Condor's SageMaker/Bedrock/Lambda preference) — this
-  runs locally/in a container. The offline/online split in
-  `docs/ARCHITECTURE.md` is exactly the shape you'd lift onto
-  Lambda/Fargate + SageMaker, but it hasn't actually been deployed there.
 - **React frontend** (Condor's nice-to-have) — the dashboard here is plain
   HTML/JS by design (zero build step, easy to read end-to-end in one
   sitting); a React rewrite would be additive polish, not a different
@@ -54,10 +51,14 @@ The honest framing that holds up under follow-up questions: *"I built the
 full pipeline shape a production forecasting + agentic system actually has —
 backtesting methodology, per-series model selection, anomaly detection that
 distinguishes explained from unexplained, an agent with a real tool-calling
-architecture and an audit trail, and a monitoring layer that catches
-individual-series drift the fleet average would hide. The data is synthetic
-because of a sandboxed build environment, generated to match a specific real
-dataset's schema and statistical character, and that's disclosed everywhere
-rather than implied to be real. What I haven't done yet is run any of this
-against real production traffic or a cloud deployment — that's the gap
-between this and the target roles, and I know exactly where it is."*
+architecture and an audit trail, a monitoring layer that catches
+individual-series drift the fleet average would hide, and a full AWS
+deployment (SageMaker, Bedrock, Lambda) with real Terraform and real test
+coverage against mocked AWS calls. The data is synthetic because of a
+sandboxed build environment, generated to match a specific real dataset's
+schema and statistical character, and that's disclosed everywhere rather
+than implied to be real. What I haven't done yet is run any of this
+against real production traffic, or actually apply the Terraform against
+a live AWS account — that's the gap between this and the target roles,
+and I know exactly where it is (see `infra/README.md`'s disclosure
+section for the specifics)."*

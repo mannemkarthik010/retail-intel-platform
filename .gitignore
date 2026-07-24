@@ -10,3 +10,12 @@ __pycache__/
 # revised before it's added back in
 docs/*.docx
 docs/*.pdf
+
+# Terraform runtime state/cache -- never commit state (it can contain
+# secret values in plaintext) or the local provider plugin cache.
+infra/terraform/.terraform/
+infra/terraform/.terraform.lock.hcl
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/terraform.tfvars
+infra/terraform/build/

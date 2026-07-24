@@ -5,7 +5,7 @@ this mirrors production, where the online agent never re-scores live."""
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -164,9 +164,12 @@ class TestMockLLMRouting(unittest.TestCase):
 
 class TestBackendSelection(unittest.TestCase):
     """No network calls here -- just the env-var dispatch logic in
-    get_llm_backend(), and the OpenAI tool-spec shape conversion. Real
-    calls to either provider are exercised manually (see README) with a
-    live API key, not in the test suite."""
+    get_llm_backend(), and the OpenAI/Bedrock tool-spec shape conversions.
+    Real calls to any provider are exercised manually (see README) with
+    live credentials, not in the test suite. Bedrock specifically needs
+    boto3 to even import, so those tests patch sys.modules with a fake
+    boto3 module -- this exercises the dispatch/loop logic without boto3
+    actually being installed or any real AWS call happening."""
 
     def test_defaults_to_mock_with_no_keys(self):
         from src.agent import get_llm_backend, MockLLM
@@ -214,6 +217,89 @@ class TestBackendSelection(unittest.TestCase):
             self.assertEqual(s["type"], "function")
             self.assertIn("parameters", s["function"])
             self.assertEqual(s["function"]["parameters"]["type"], "object")
+
+    def test_prefers_bedrock_when_only_that_signal_present(self):
+        from src.agent import get_llm_backend, BedrockLLM
+        with patch.dict("sys.modules", {"boto3": MagicMock()}):
+            with patch.dict("os.environ", {"BEDROCK_MODEL_ID": "anthropic.claude-3-fake"}, clear=True):
+                self.assertIsInstance(get_llm_backend(), BedrockLLM)
+
+    def test_generic_aws_credentials_alone_do_not_trigger_bedrock(self):
+        """Deliberate design choice (see get_llm_backend()'s docstring):
+        AWS creds are often present for unrelated reasons (S3 access,
+        deployment tooling), so their mere presence shouldn't silently
+        switch the agent's brain to Bedrock -- only an explicit
+        BEDROCK_MODEL_ID (or LLM_BACKEND=bedrock) should."""
+        from src.agent import get_llm_backend, MockLLM
+        env = {"AWS_ACCESS_KEY_ID": "fake", "AWS_SECRET_ACCESS_KEY": "fake", "AWS_REGION": "us-east-1"}
+        with patch.dict("os.environ", env, clear=True):
+            self.assertIsInstance(get_llm_backend(), MockLLM)
+
+    def test_llm_backend_env_var_forces_bedrock_even_with_anthropic_key_present(self):
+        from src.agent import get_llm_backend, BedrockLLM
+        env = {"ANTHROPIC_API_KEY": "sk-test-fake", "BEDROCK_MODEL_ID": "anthropic.claude-3-fake",
+               "LLM_BACKEND": "bedrock"}
+        with patch.dict("sys.modules", {"boto3": MagicMock()}):
+            with patch.dict("os.environ", env, clear=True):
+                self.assertIsInstance(get_llm_backend(), BedrockLLM)
+
+    def test_bedrock_region_defaults_and_override(self):
+        from src.agent import BedrockLLM
+        fake_boto3 = MagicMock()
+        with patch.dict("sys.modules", {"boto3": fake_boto3}):
+            with patch.dict("os.environ", {"BEDROCK_MODEL_ID": "anthropic.claude-3-fake"}, clear=True):
+                backend = BedrockLLM()
+                self.assertEqual(backend.region, "us-east-1")
+                fake_boto3.client.assert_called_once_with("bedrock-runtime", region_name="us-east-1")
+
+            fake_boto3.reset_mock()
+            with patch.dict("os.environ", {"BEDROCK_MODEL_ID": "anthropic.claude-3-fake",
+                                            "AWS_REGION": "eu-west-1"}, clear=True):
+                backend = BedrockLLM()
+                self.assertEqual(backend.region, "eu-west-1")
+
+    def test_bedrock_tool_config_matches_shared_tool_registry(self):
+        from src.agent import _to_bedrock_tool_config, TOOLS
+        config = _to_bedrock_tool_config()
+        names = {t["toolSpec"]["name"] for t in config["tools"]}
+        self.assertEqual(names, set(TOOLS.keys()))
+        for t in config["tools"]:
+            spec = t["toolSpec"]
+            self.assertIn("description", spec)
+            self.assertIn("json", spec["inputSchema"])
+            self.assertEqual(spec["inputSchema"]["json"]["type"], "object")
+
+    def test_bedrock_answer_loop_executes_tool_call_then_returns_final_text(self):
+        """Simulates one Converse API round-trip: the model calls a tool,
+        gets a result, then answers in text on the next turn. The boto3
+        client itself is a MagicMock (no real AWS call), and the tool
+        registry is patched so this doesn't depend on reports/ existing."""
+        from src.agent import BedrockLLM, AgentTrace, TOOLS
+
+        fake_boto3 = MagicMock()
+        fake_client = MagicMock()
+        fake_boto3.client.return_value = fake_client
+        tool_use_turn = {"output": {"message": {"role": "assistant", "content": [
+            {"toolUse": {"toolUseId": "t1", "name": "get_forecast", "input": {"store": 1, "dept": 1}}}
+        ]}}}
+        final_turn = {"output": {"message": {"role": "assistant", "content": [
+            {"text": "Here is the forecast."}
+        ]}}}
+        fake_client.converse.side_effect = [tool_use_turn, final_turn]
+
+        fake_tool = MagicMock(return_value={"forecast": [], "model_used": "mock", "backtest_wape": None})
+        with patch.dict("sys.modules", {"boto3": fake_boto3}):
+            with patch.dict("os.environ", {"BEDROCK_MODEL_ID": "anthropic.claude-3-fake"}, clear=True):
+                with patch.dict(TOOLS, {"get_forecast": fake_tool}):
+                    backend = BedrockLLM()
+                    trace = AgentTrace(question="what's the forecast for store 1 dept 1?")
+                    answer = backend.answer("what's the forecast for store 1 dept 1?", trace)
+
+        self.assertEqual(answer, "Here is the forecast.")
+        self.assertEqual(len(trace.steps), 1)
+        self.assertEqual(trace.steps[0]["tool"], "get_forecast")
+        fake_tool.assert_called_once_with(store=1, dept=1)
+        self.assertEqual(fake_client.converse.call_count, 2)
 
 
 if __name__ == "__main__":

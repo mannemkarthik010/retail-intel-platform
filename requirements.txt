@@ -15,6 +15,18 @@ flask>=3.0
 # vendor SDK)
 requests>=2.31
 
+# Agent, Bedrock backend only (optional -- only needed if BEDROCK_MODEL_ID
+# or LLM_BACKEND=bedrock is set; see src/agent.py::BedrockLLM). Unlike the
+# two HTTP-only backends above, boto3 is a deliberate exception to the
+# "no vendor SDK" pattern -- AWS auth is SigV4-signed, not a bearer token a
+# plain `requests` call can attach easily, and boto3 is the standard SDK
+# needed anyway for the S3/Lambda/SageMaker calls in infra/. NOT
+# installable in the build sandbox this repo was assembled in (pip installs
+# beyond a pre-cached set were blocked there -- see infra/README.md's
+# disclosure section), so BedrockLLM's dispatch/tool-calling logic is only
+# tested with a mocked boto3 (tests/test_agent.py), never a real one.
+# boto3>=1.34
+
 # Dev / testing
 # (pytest is the standard choice; this repo's test suite also runs fine with
 #  the stdlib `unittest` -- see docs/ARCHITECTURE.md for why)
