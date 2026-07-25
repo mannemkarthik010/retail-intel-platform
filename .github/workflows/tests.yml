@@ -33,6 +33,9 @@ jobs:
       - name: Run the monitoring simulation
         run: python scripts/run_monitoring_sim.py
 
+      - name: Retrain/re-select any series flagged for drift
+        run: python scripts/retrain_flagged.py
+
       - name: Run the test suite
         run: python -m unittest discover -s tests -v
 

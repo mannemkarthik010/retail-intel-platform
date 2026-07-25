@@ -2,6 +2,7 @@
 the audit trail. Requires reports/ artifacts to exist (run
 scripts/run_pipeline.py first) since DataStore reads them from disk --
 this mirrors production, where the online agent never re-scores live."""
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -300,6 +301,172 @@ class TestBackendSelection(unittest.TestCase):
         self.assertEqual(trace.steps[0]["tool"], "get_forecast")
         fake_tool.assert_called_once_with(store=1, dept=1)
         self.assertEqual(fake_client.converse.call_count, 2)
+
+
+class TestRetryBackoffAndCostTracking(unittest.TestCase):
+    """Real LLM backends (unlike MockLLM) make network calls that can
+    transiently fail -- rate limits, momentary 5xx, dropped connections --
+    and cost real money per token. This covers the retry/backoff helper and
+    the cost-estimation/usage-accumulation logic in isolation (no real
+    network calls), plus one integration test showing AnthropicLLM actually
+    wires retries and usage into the trace end to end."""
+
+    def setUp(self):
+        # every test in this class disables the real time.sleep so retry
+        # backoff doesn't actually slow the suite down
+        patcher = patch("src.agent.time.sleep", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_retry_succeeds_on_first_try_reports_zero_retries(self):
+        from src.agent import _retry_with_backoff
+        result, retries = _retry_with_backoff(lambda: "ok")
+        self.assertEqual(result, "ok")
+        self.assertEqual(retries, 0)
+
+    def test_retry_recovers_after_transient_failures(self):
+        from src.agent import _retry_with_backoff
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionError("transient")
+            return "ok"
+
+        result, retries = _retry_with_backoff(flaky, retryable=lambda e: True)
+        self.assertEqual(result, "ok")
+        self.assertEqual(retries, 2)
+        self.assertEqual(calls["n"], 3)
+
+    def test_retry_raises_immediately_when_not_retryable(self):
+        from src.agent import _retry_with_backoff
+        calls = {"n": 0}
+
+        def always_fails():
+            calls["n"] += 1
+            raise ValueError("permanent")
+
+        with self.assertRaises(ValueError):
+            _retry_with_backoff(always_fails, retryable=lambda e: False)
+        self.assertEqual(calls["n"], 1)  # no retry attempted at all
+
+    def test_retry_exhausts_max_attempts_then_raises(self):
+        from src.agent import _retry_with_backoff
+        calls = {"n": 0}
+
+        def always_fails():
+            calls["n"] += 1
+            raise ConnectionError("still down")
+
+        with self.assertRaises(ConnectionError):
+            _retry_with_backoff(always_fails, max_retries=3, retryable=lambda e: True)
+        self.assertEqual(calls["n"], 3)
+
+    def test_requests_error_classifier_flags_rate_limit_and_5xx_as_retryable(self):
+        import requests
+        from src.agent import _is_retryable_requests_error
+
+        for status in (429, 500, 502, 503):
+            resp = MagicMock(status_code=status)
+            err = requests.exceptions.HTTPError(response=resp)
+            self.assertTrue(_is_retryable_requests_error(err), f"status {status} should be retryable")
+
+        resp = MagicMock(status_code=401)
+        err = requests.exceptions.HTTPError(response=resp)
+        self.assertFalse(_is_retryable_requests_error(err), "auth errors should not be retried")
+
+        self.assertTrue(_is_retryable_requests_error(requests.exceptions.ConnectionError()))
+        self.assertFalse(_is_retryable_requests_error(ValueError("unrelated")))
+
+    def test_bedrock_error_classifier_flags_throttling_not_validation(self):
+        from src.agent import _is_retryable_bedrock_error
+
+        throttling = Exception()
+        throttling.response = {"Error": {"Code": "ThrottlingException"}}
+        self.assertTrue(_is_retryable_bedrock_error(throttling))
+
+        validation = Exception()
+        validation.response = {"Error": {"Code": "ValidationException"}}
+        self.assertFalse(_is_retryable_bedrock_error(validation))
+
+        self.assertFalse(_is_retryable_bedrock_error(ValueError("no response attr")))
+
+    def test_cost_estimate_known_model(self):
+        from src.agent import _estimate_cost_usd
+        cost = _estimate_cost_usd("anthropic", "claude-sonnet-4-5", input_tokens=1_000_000, output_tokens=1_000_000)
+        self.assertAlmostEqual(cost, 3.00 + 15.00)
+
+    def test_cost_estimate_unknown_model_non_bedrock_returns_none(self):
+        from src.agent import _estimate_cost_usd
+        self.assertIsNone(_estimate_cost_usd("openai", "some-future-model", 1000, 1000))
+
+    def test_cost_estimate_bedrock_unknown_model_id_uses_default_pricing(self):
+        from src.agent import _estimate_cost_usd, BEDROCK_DEFAULT_PRICING
+        cost = _estimate_cost_usd("bedrock", "anthropic.claude-3-5-sonnet-fake", 1_000_000, 1_000_000)
+        self.assertAlmostEqual(cost, BEDROCK_DEFAULT_PRICING["input"] + BEDROCK_DEFAULT_PRICING["output"])
+
+    def test_trace_add_usage_accumulates_across_multiple_turns(self):
+        from src.agent import AgentTrace
+        trace = AgentTrace(question="q", backend="anthropic")
+        trace.add_usage(100, 50, model="claude-sonnet-4-5")
+        trace.add_usage(30, 20, model="claude-sonnet-4-5")
+        self.assertEqual(trace.token_usage, {"input_tokens": 130, "output_tokens": 70})
+        self.assertIsNotNone(trace.estimated_cost_usd)
+        self.assertGreater(trace.estimated_cost_usd, 0)
+
+    def test_persist_writes_usage_log_only_for_real_backends(self):
+        import tempfile
+        from src import agent as agent_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(agent_mod, "REPORTS", Path(tmp)):
+                mock_trace = agent_mod.AgentTrace(question="q", backend="mock", final_answer="a")
+                mock_trace.persist()
+                self.assertTrue((Path(tmp) / "agent_traces.jsonl").exists())
+                self.assertFalse((Path(tmp) / "llm_usage.jsonl").exists())
+
+                real_trace = agent_mod.AgentTrace(question="q2", backend="anthropic", final_answer="a2")
+                real_trace.add_usage(10, 5, model="claude-sonnet-4-5")
+                real_trace.persist()
+                self.assertTrue((Path(tmp) / "llm_usage.jsonl").exists())
+                logged = json.loads((Path(tmp) / "llm_usage.jsonl").read_text().strip())
+                self.assertEqual(logged["input_tokens"], 10)
+                self.assertEqual(logged["output_tokens"], 5)
+
+    def test_anthropic_answer_retries_transient_error_then_succeeds_and_tracks_usage(self):
+        """Integration test: the first HTTP call raises a retryable 500,
+        the second succeeds with a final text answer -- confirms
+        AnthropicLLM.answer actually threads retries + token usage into
+        the trace, not just that the standalone helpers work in isolation."""
+        import requests
+        from src.agent import AnthropicLLM, AgentTrace
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test-fake"}, clear=True):
+            backend = AnthropicLLM()
+
+        ok_response = MagicMock()
+        ok_response.raise_for_status.return_value = None
+        ok_response.json.return_value = {
+            "content": [{"type": "text", "text": "Here's your answer."}],
+            "usage": {"input_tokens": 42, "output_tokens": 17},
+        }
+
+        failing_response = MagicMock()
+        failing_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=503))
+
+        backend._requests = MagicMock()
+        backend._requests.post.side_effect = [failing_response, ok_response]
+
+        trace = AgentTrace(question="What's the forecast for store 1 dept 1?")
+        answer = backend.answer(trace.question, trace)
+
+        self.assertEqual(answer, "Here's your answer.")
+        self.assertEqual(trace.retries, 1)
+        self.assertEqual(trace.token_usage, {"input_tokens": 42, "output_tokens": 17})
+        self.assertIsNotNone(trace.estimated_cost_usd)
+        self.assertEqual(backend._requests.post.call_count, 2)
 
 
 if __name__ == "__main__":

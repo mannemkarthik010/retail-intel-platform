@@ -1,0 +1,120 @@
+{
+  "mock_backend": {
+    "backend": "mock",
+    "n_cases": 37,
+    "n_passed": 37,
+    "overall_accuracy": 1.0,
+    "real_case_accuracy": 1.0,
+    "n_known_limitations": 5,
+    "known_limitations_all_documented_correctly": true,
+    "by_category": {
+      "forecast": {
+        "n": 6,
+        "passed": 6,
+        "accuracy": 1.0
+      },
+      "anomalies": {
+        "n": 5,
+        "passed": 5,
+        "accuracy": 1.0
+      },
+      "explain_change": {
+        "n": 5,
+        "passed": 5,
+        "accuracy": 1.0
+      },
+      "top_movers": {
+        "n": 5,
+        "passed": 5,
+        "accuracy": 1.0
+      },
+      "what_if": {
+        "n": 6,
+        "passed": 6,
+        "accuracy": 1.0
+      },
+      "drivers": {
+        "n": 5,
+        "passed": 5,
+        "accuracy": 1.0
+      },
+      "known_limitation": {
+        "n": 5,
+        "passed": 5,
+        "accuracy": 1.0
+      }
+    },
+    "failures": [],
+    "known_limitation_cases": [
+      {
+        "id": "kl-01",
+        "category": "known_limitation",
+        "question": "why did store 3 dep.5 change",
+        "known_limitation": true,
+        "passed": true,
+        "mismatches": [],
+        "actual_tool": "explain_change",
+        "actual_args": {
+          "store": 3,
+          "dept": 1
+        }
+      },
+      {
+        "id": "kl-02",
+        "category": "known_limitation",
+        "question": "compare store 3 and store 7 on department 5",
+        "known_limitation": true,
+        "passed": true,
+        "mismatches": [],
+        "actual_tool": "get_forecast",
+        "actual_args": {
+          "store": 3,
+          "dept": 5
+        }
+      },
+      {
+        "id": "kl-03",
+        "category": "known_limitation",
+        "question": "has store 5 dept 9 been unusual lately, and why?",
+        "known_limitation": true,
+        "passed": true,
+        "mismatches": [],
+        "actual_tool": "explain_change",
+        "actual_args": {
+          "store": 5,
+          "dept": 9
+        }
+      },
+      {
+        "id": "kl-04",
+        "category": "known_limitation",
+        "question": "gimme the numbers for store four department two",
+        "known_limitation": true,
+        "passed": true,
+        "mismatches": [],
+        "actual_tool": "get_forecast",
+        "actual_args": {
+          "store": 1,
+          "dept": 1
+        }
+      },
+      {
+        "id": "kl-05",
+        "category": "known_limitation",
+        "question": "What are the top gainers?",
+        "known_limitation": true,
+        "passed": true,
+        "mismatches": [],
+        "actual_tool": "get_forecast",
+        "actual_args": {
+          "store": 1,
+          "dept": 1
+        }
+      }
+    ]
+  },
+  "real_backend": {
+    "skipped": true,
+    "reason": "no ANTHROPIC_API_KEY / OPENAI_API_KEY / BEDROCK_MODEL_ID set in this environment -- run again with one exported to also benchmark a real tool-calling LLM instead of just the deterministic mock router"
+  }
+}

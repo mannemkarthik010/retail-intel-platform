@@ -23,12 +23,13 @@ Design goals (mirroring what the target job descriptions actually ask for):
 """
 import json
 import os
+import random
 import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
@@ -356,6 +357,82 @@ TOOL_SPECS = [
 
 
 # --------------------------------------------------------------------------
+# Retry/backoff + cost tracking shared by the three real LLM backends below.
+# MockLLM never makes a network call, so none of this applies to it -- there
+# is nothing to retry and nothing to cost.
+#
+# Retrying blindly on ANY exception would waste attempts retrying things
+# that will never succeed (a 401 from a bad API key, a 400 from a malformed
+# request) -- each backend below supplies its own `retryable(exc) -> bool`
+# predicate so only actually-transient failures (rate limits, momentary
+# 5xx/overload, connection hiccups) get retried.
+# --------------------------------------------------------------------------
+def _retry_with_backoff(fn, max_retries: int = 4, base_delay: float = 1.0, retryable=None):
+    """Calls fn() with exponential backoff + jitter. Returns (result,
+    retries_used). Raises the last exception once max_retries is exhausted,
+    or immediately if `retryable(exc)` says the failure isn't transient."""
+    retryable = retryable or (lambda e: False)
+    for attempt in range(max_retries):
+        try:
+            return fn(), attempt
+        except Exception as e:
+            if not retryable(e) or attempt == max_retries - 1:
+                raise
+            time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 0.5))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+_RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+
+
+def _is_retryable_requests_error(e: Exception) -> bool:
+    import requests
+    if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(e, requests.exceptions.HTTPError):
+        status = e.response.status_code if e.response is not None else None
+        return status in _RETRYABLE_HTTP_STATUS
+    return False
+
+
+def _is_retryable_bedrock_error(e: Exception) -> bool:
+    """botocore's ClientError carries the AWS error code in
+    e.response['Error']['Code'] -- checked via getattr/dict.get rather than
+    importing botocore, since boto3 is an optional dependency (see
+    BedrockLLM's docstring) and this predicate must not force-import it."""
+    response = getattr(e, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = response.get("Error", {}).get("Code", "")
+    return code in {"ThrottlingException", "ServiceUnavailable", "ModelTimeoutException",
+                     "InternalServerException", "ModelNotReadyException"}
+
+
+# Approximate list prices in USD per 1M tokens, accurate as of when this was
+# written -- for COST-AWARENESS in the trace/usage log (reports/llm_usage.jsonl),
+# NOT billing-accurate invoicing. Provider pricing changes over time; check
+# the vendor's current pricing page before relying on this for anything
+# financial. Bedrock model IDs vary by region/version and aren't matched
+# here individually, so BEDROCK_DEFAULT_PRICING assumes a Claude-family
+# model (the common case) rather than trying to parse every possible ID.
+LLM_PRICING_USD_PER_1M_TOKENS = {
+    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+}
+BEDROCK_DEFAULT_PRICING = {"input": 3.00, "output": 15.00}
+
+
+def _estimate_cost_usd(backend: str, model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
+    pricing = LLM_PRICING_USD_PER_1M_TOKENS.get(model)
+    if pricing is None and backend == "bedrock":
+        pricing = BEDROCK_DEFAULT_PRICING
+    if pricing is None:
+        return None
+    return round(input_tokens / 1e6 * pricing["input"] + output_tokens / 1e6 * pricing["output"], 6)
+
+
+# --------------------------------------------------------------------------
 # Audit trail
 # --------------------------------------------------------------------------
 @dataclass
@@ -364,6 +441,10 @@ class AgentTrace:
     steps: list = field(default_factory=list)
     final_answer: str = ""
     backend: str = ""
+    model: str = ""
+    token_usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
+    estimated_cost_usd: Optional[float] = None
+    retries: int = 0
 
     def log_step(self, tool: str, args: dict, result: dict, reasoning: str = ""):
         self.steps.append({
@@ -375,14 +456,38 @@ class AgentTrace:
             "ts": round(time.time(), 3),
         })
 
+    def add_usage(self, input_tokens: int, output_tokens: int, model: str = ""):
+        """Called once per real API round-trip (a single `ask()` can make
+        several, one per tool-calling turn) -- accumulates across the whole
+        answer rather than overwriting, so a multi-turn tool-calling loop
+        reports its TOTAL cost, not just the last turn's."""
+        self.token_usage["input_tokens"] += input_tokens
+        self.token_usage["output_tokens"] += output_tokens
+        if model:
+            self.model = model
+        self.estimated_cost_usd = _estimate_cost_usd(
+            self.backend, self.model, self.token_usage["input_tokens"], self.token_usage["output_tokens"])
+
     def to_dict(self):
-        return {"question": self.question, "backend": self.backend,
-                "steps": self.steps, "final_answer": self.final_answer}
+        return {"question": self.question, "backend": self.backend, "model": self.model,
+                "steps": self.steps, "final_answer": self.final_answer,
+                "token_usage": self.token_usage, "estimated_cost_usd": self.estimated_cost_usd,
+                "retries": self.retries}
 
     def persist(self):
         REPORTS.mkdir(exist_ok=True)
         with open(REPORTS / "agent_traces.jsonl", "a") as f:
             f.write(json.dumps(self.to_dict()) + "\n")
+        # Only real (non-mock) backends ever accumulate token usage --
+        # skip the cost/usage log entirely for MockLLM rather than
+        # appending meaningless all-zero rows to it.
+        if self.token_usage["input_tokens"] or self.token_usage["output_tokens"]:
+            with open(REPORTS / "llm_usage.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "ts": round(time.time(), 3), "backend": self.backend, "model": self.model,
+                    "question": self.question, **self.token_usage,
+                    "estimated_cost_usd": self.estimated_cost_usd, "retries": self.retries,
+                }) + "\n")
 
 
 # --------------------------------------------------------------------------
@@ -505,33 +610,38 @@ class AnthropicLLM:
         self.api_key = os.environ["ANTHROPIC_API_KEY"]
 
     def _call(self, messages):
-        resp = self._requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "max_tokens": 1024,
-                "tools": TOOL_SPECS,
-                "system": (
-                    "You are a retail demand-forecasting analyst assistant. Use the "
-                    "provided tools to answer questions about specific store/department "
-                    "series. Always ground numeric claims in tool results, never guess."
-                ),
-                "messages": messages,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        def do_call():
+            resp = self._requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": 1024,
+                    "tools": TOOL_SPECS,
+                    "system": (
+                        "You are a retail demand-forecasting analyst assistant. Use the "
+                        "provided tools to answer questions about specific store/department "
+                        "series. Always ground numeric claims in tool results, never guess."
+                    ),
+                    "messages": messages,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        return _retry_with_backoff(do_call, retryable=_is_retryable_requests_error)
 
     def answer(self, question: str, trace: AgentTrace) -> str:
         messages = [{"role": "user", "content": question}]
         for _ in range(self.max_turns):
-            result = self._call(messages)
+            result, retries = self._call(messages)
+            trace.retries += retries
+            usage = result.get("usage", {})
+            trace.add_usage(usage.get("input_tokens", 0), usage.get("output_tokens", 0), model=self.model)
             content = result.get("content", [])
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
             text_blocks = [b["text"] for b in content if b.get("type") == "text"]
@@ -586,22 +696,24 @@ class OpenAILLM:
         self.tool_specs = _to_openai_tool_specs()
 
     def _call(self, messages):
-        resp = self._requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": messages,
-                "tools": self.tool_specs,
-                "tool_choice": "auto",
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        def do_call():
+            resp = self._requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": self.tool_specs,
+                    "tool_choice": "auto",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        return _retry_with_backoff(do_call, retryable=_is_retryable_requests_error)
 
     def answer(self, question: str, trace: AgentTrace) -> str:
         messages = [
@@ -613,7 +725,10 @@ class OpenAILLM:
             {"role": "user", "content": question},
         ]
         for _ in range(self.max_turns):
-            result = self._call(messages)
+            result, retries = self._call(messages)
+            trace.retries += retries
+            usage = result.get("usage", {})
+            trace.add_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), model=self.model)
             message = result["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
@@ -685,21 +800,26 @@ class BedrockLLM:
         self._tool_config = _to_bedrock_tool_config()
 
     def _call(self, messages):
-        return self._client.converse(
-            modelId=self.model_id,
-            messages=messages,
-            system=[{"text": (
-                "You are a retail demand-forecasting analyst assistant. Use the "
-                "provided tools to answer questions about specific store/department "
-                "series. Always ground numeric claims in tool results, never guess."
-            )}],
-            toolConfig=self._tool_config,
-        )
+        def do_call():
+            return self._client.converse(
+                modelId=self.model_id,
+                messages=messages,
+                system=[{"text": (
+                    "You are a retail demand-forecasting analyst assistant. Use the "
+                    "provided tools to answer questions about specific store/department "
+                    "series. Always ground numeric claims in tool results, never guess."
+                )}],
+                toolConfig=self._tool_config,
+            )
+        return _retry_with_backoff(do_call, retryable=_is_retryable_bedrock_error)
 
     def answer(self, question: str, trace: AgentTrace) -> str:
         messages = [{"role": "user", "content": [{"text": question}]}]
         for _ in range(self.max_turns):
-            result = self._call(messages)
+            result, retries = self._call(messages)
+            trace.retries += retries
+            usage = result.get("usage", {})
+            trace.add_usage(usage.get("inputTokens", 0), usage.get("outputTokens", 0), model=self.model_id)
             message = result["output"]["message"]
             content = message.get("content", [])
             tool_uses = [b["toolUse"] for b in content if "toolUse" in b]

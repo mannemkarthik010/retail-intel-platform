@@ -14,7 +14,8 @@ COPY . .
 # online split described in docs/ARCHITECTURE.md.
 RUN python data/generate_data.py \
     && python scripts/run_pipeline.py \
-    && python scripts/run_monitoring_sim.py
+    && python scripts/run_monitoring_sim.py \
+    && python scripts/retrain_flagged.py
 
 EXPOSE 8000
 

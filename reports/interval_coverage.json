@@ -1,11 +1,11 @@
 {
   "cutoff_date": "2023-10-29",
   "nominal_coverage": 0.8,
-  "empirical_coverage_overall": 0.7469,
+  "empirical_coverage_overall": 0.7422,
   "n_observations": 1920,
   "empirical_coverage_by_selected_model": {
-    "holt_winters": 0.725,
-    "global_gbm": 0.7304,
-    "seasonal_naive": 0.775
+    "holt_winters": 0.7361,
+    "global_gbm": 0.7266,
+    "seasonal_naive": 0.7747
   }
 }

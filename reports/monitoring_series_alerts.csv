@@ -1,5 +1,5 @@
 series,model,latest_wape,prior_avg_wape,delta
 S13_D08,seasonal_naive,0.2271,0.0583,0.1688
-S19_D07,global_gbm,0.1913,0.041,0.1503
-S10_D03,global_gbm,0.1566,0.0496,0.107
+S19_D07,global_gbm,0.1894,0.0412,0.1482
+S10_D03,global_gbm,0.154,0.0495,0.1045
 S11_D12,holt_winters,0.1978,0.0935,0.1043

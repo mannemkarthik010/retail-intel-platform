@@ -198,6 +198,10 @@ def main():
     current_fc.to_csv(REPORTS / "current_forecasts.csv", index=False)
     print(f"  -> wrote current_forecasts.csv ({len(current_fc)} rows)")
 
+    print("\nRunning agent tool-routing eval harness (scripts/run_agent_eval.py)...")
+    from scripts.run_agent_eval import main as run_agent_eval
+    run_agent_eval()
+
     print("\nDone. Artifacts in reports/:")
     for f in sorted(REPORTS.glob("*.csv")) + sorted(REPORTS.glob("*.json")):
         print(" -", f.name)

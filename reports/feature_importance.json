@@ -1,62 +1,62 @@
 [
   {
     "feature": "rollmean_4",
-    "importance_mean": 6560.8859,
-    "importance_std": 66.2392
+    "importance_mean": 6381.5158,
+    "importance_std": 63.3264
   },
   {
     "feature": "lag_1",
-    "importance_mean": 5458.8688,
-    "importance_std": 53.7304
-  },
-  {
-    "feature": "IsHoliday",
-    "importance_mean": 1615.236,
-    "importance_std": 5.4664
+    "importance_mean": 5024.6794,
+    "importance_std": 54.6893
   },
   {
     "feature": "lag_52",
-    "importance_mean": 1607.2277,
-    "importance_std": 12.6608
+    "importance_mean": 1664.706,
+    "importance_std": 16.2377
   },
   {
-    "feature": "rollmean_12",
-    "importance_mean": 532.764,
-    "importance_std": 17.6659
-  },
-  {
-    "feature": "rollmean_8",
-    "importance_mean": 450.691,
-    "importance_std": 16.4469
+    "feature": "IsHoliday",
+    "importance_mean": 1623.609,
+    "importance_std": 3.8628
   },
   {
     "feature": "lag_2",
-    "importance_mean": 433.1342,
-    "importance_std": 14.0242
+    "importance_mean": 568.2424,
+    "importance_std": 19.5897
+  },
+  {
+    "feature": "rollmean_8",
+    "importance_mean": 386.7587,
+    "importance_std": 12.9213
   },
   {
     "feature": "lag_4",
-    "importance_mean": 302.1571,
-    "importance_std": 13.3688
+    "importance_mean": 284.136,
+    "importance_std": 12.5306
+  },
+  {
+    "feature": "rollmean_12",
+    "importance_mean": 218.6293,
+    "importance_std": 16.3978
   },
   {
     "feature": "lag_8",
-    "importance_mean": 219.9271,
-    "importance_std": 20.4238
+    "importance_mean": 212.7863,
+    "importance_std": 19.5672
   },
   {
     "feature": "rollstd_4",
-    "importance_mean": 201.4583,
-    "importance_std": 6.7628
-  },
-  {
-    "feature": "rollstd_8",
-    "importance_mean": 152.5977,
-    "importance_std": 6.7295
+    "importance_mean": 164.6029,
+    "importance_std": 1.5793
   },
   {
     "feature": "Size",
-    "importance_mean": 152.1043,
-    "importance_std": 8.0436
+    "importance_mean": 149.6852,
+    "importance_std": 3.8863
+  },
+  {
+    "feature": "Fuel_Price",
+    "importance_mean": 141.3072,
+    "importance_std": 5.8725
   }
 ]

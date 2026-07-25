@@ -16,28 +16,44 @@ everything strictly before it.
 
 | Model | Mean WAPE | Median WAPE | Std WAPE | Mean MAPE | Series won (/240) |
 |---|---|---|---|---|---|
-| Global GBM | **8.21%** | 7.08% | 3.68% | 9.30% | **140** |
-| Seasonal-naive | 8.58% | 7.63% | 2.84% | 9.50% | 90 |
-| Holt-Winters | 11.16% | 10.16% | 3.58% | 12.26% | 10 |
+| Global GBM | **7.90%** | 6.72% | 3.54% | 8.96% | **154** |
+| Seasonal-naive | 8.58% | 7.63% | 2.84% | 9.50% | 77 |
+| Holt-Winters | 11.16% | 10.16% | 3.58% | 12.26% | 9 |
 
 ![Mean WAPE by model](../reports/figures/wape_by_model.png)
 ![Per-series model selection outcome](../reports/figures/series_wins.png)
 
 **Reading this honestly:** the global GBM wins on more series and has the
-best mean WAPE, but by less than half a point over seasonal-naive — and
-seasonal-naive still wins outright on 90/240 series (37.5%). Those are
+best mean WAPE, but by well under a point over seasonal-naive — and
+seasonal-naive still wins outright on 77/240 series (32%). Those are
 overwhelmingly series with strong, low-noise annual seasonality where "same
 week last year" is close to the ceiling of what's predictable, and a more
 flexible model's extra variance costs more than it's worth. This is *why*
 the pipeline selects per series instead of globally: a system that always
-deployed the GBM everywhere would be quietly worse on over a third of the
+deployed the GBM everywhere would be quietly worse on nearly a third of the
 series than the one built here.
 
 Holt-Winters' weaker showing traces directly to the documented substitution
 in `docs/ARCHITECTURE.md`: fixed smoothing constants (a small grid search)
 instead of MLE-fit ones. That's a real, disclosed cost, not a hidden one.
 
-**Example series** (Store 3 / Dept 5, global GBM selected, backtest WAPE 4.4%):
+**A reproducibility note, found while re-verifying these numbers on a
+different machine than the one this repo was originally built on:** the
+GBM's exact win count and mean WAPE shifted (140→154 series, 8.21%→7.90%)
+between the original build environment and this one, even though the
+underlying synthetic dataset is byte-identical (verified via checksum) and
+`GlobalGBMModel.fit()` passes a fixed `random_state=42`. Re-running the
+backtest twice in a row *within* this environment reproduces the identical
+result both times — so this isn't nondeterminism in the usual sense, it's
+that `sklearn.ensemble.HistGradientBoostingRegressor`'s fixed-seed behavior
+is repeatable within one sklearn version/platform but not guaranteed
+bit-identical across different ones. The qualitative conclusions (GBM wins
+narrowly, seasonal-naive still takes a meaningful chunk of series, Holt-
+Winters trails) are unaffected — but "the exact number" and "a number from
+this exact environment" turn out to be different claims here, which seemed
+worth disclosing rather than quietly patching over.
+
+**Example series** (Store 3 / Dept 5, global GBM selected, backtest WAPE 4.2%):
 
 ![Example forecast](../reports/figures/example_forecast.png)
 
@@ -105,12 +121,12 @@ arrived":
 
 | Cutoff | Fleet mean WAPE | Drift flagged? |
 |---|---|---|
-| 2023-01-22 | 8.41% | — (first checkpoint) |
-| 2023-03-19 | 6.56% | No |
-| 2023-05-14 | 6.38% | No |
-| 2023-07-09 | 7.89% | No |
-| 2023-09-03 | 6.73% | No |
-| 2023-10-29 | 6.65% | No |
+| 2023-01-22 | 7.87% | — (first checkpoint) |
+| 2023-03-19 | 6.62% | No |
+| 2023-05-14 | 6.39% | No |
+| 2023-07-09 | 7.59% | No |
+| 2023-09-03 | 6.65% | No |
+| 2023-10-29 | 6.66% | No |
 
 ![Fleet monitoring over time](../reports/figures/monitoring_fleet.png)
 
@@ -121,14 +137,36 @@ fleet's) surfaces 4 series a real team would queue for a retraining review:
 | Series | Deployed model | Latest WAPE | Prior avg WAPE | Delta |
 |---|---|---|---|---|
 | S13_D08 | seasonal_naive | 22.7% | 5.8% | +16.9pts |
-| S19_D07 | global_gbm | 19.1% | 4.1% | +15.0pts |
-| S10_D03 | global_gbm | 15.7% | 5.0% | +10.7pts |
+| S19_D07 | global_gbm | 18.9% | 4.1% | +14.8pts |
+| S10_D03 | global_gbm | 15.4% | 5.0% | +10.5pts |
 | S11_D12 | holt_winters | 19.8% | 9.4% | +10.4pts |
 
 This is the point of monitoring at the series level rather than only the
 fleet level: "the average looks fine" and "every individual series is fine"
 are different claims, and only checking the first one is how a production
 system quietly lets a handful of series go stale.
+
+**Closing the loop:** `scripts/retrain_flagged.py` runs right after the
+monitoring simulation and acts on this exact table (see
+`docs/ARCHITECTURE.md`'s "Closing the monitoring loop" section for the
+method) instead of leaving it as a report nobody reads. On the run that
+produced the table above:
+
+| Series | Deployed model | Best model at latest cutoff | Decision |
+|---|---|---|---|
+| S13_D08 | seasonal_naive | seasonal_naive | kept — still the best choice |
+| S19_D07 | global_gbm | global_gbm | kept — still the best choice |
+| S10_D03 | global_gbm | seasonal_naive | **re-selected** (latest-cutoff WAPE 15.4% → 9.5%) |
+| S11_D12 | holt_winters | holt_winters | kept — still the best choice |
+
+**Reading this honestly:** 3 of the 4 alerts were the deployed model having
+a genuinely rough recent stretch, not a case where a different model would
+have done better — the review confirms the original selection instead of
+churning it, which is itself a useful, loggable outcome. Only S10_D03's
+alert pointed at an actual better alternative (fittingly, the same
+seasonal_naive-favors-strong-seasonality pattern discussed in §1), and that
+one got re-selected automatically. All four decisions, reselected or not,
+are in `reports/retraining_log.jsonl`.
 
 ## 4. Prediction intervals: are the 80% bands actually calibrated?
 
@@ -145,9 +183,9 @@ band) and writes the real number to `reports/interval_coverage.json`:
 | Selected model | Empirical coverage | Nominal target |
 |---|---|---|
 | seasonal_naive | 77.5% | 80% |
-| global_gbm | 73.0% | 80% |
-| holt_winters | 72.5% | 80% |
-| **Overall** | **74.7%** | **80%** |
+| global_gbm | 72.7% | 80% |
+| holt_winters | 73.6% | 80% |
+| **Overall** | **74.2%** | **80%** |
 
 **Reading this honestly:** the bands are a bit too narrow across the board
 — real coverage runs 5-8 points below the 80% nominal target, meaning the
@@ -176,25 +214,70 @@ for a real, standard global ranking. The global ranking, computed on a
 
 | Feature | Permutation importance (MAE increase) |
 |---|---|
-| rollmean_4 | 6,560.9 |
-| lag_1 | 5,458.9 |
-| IsHoliday | 1,615.2 |
-| lag_52 | 1,607.2 |
-| rollmean_12 | 532.8 |
-| rollmean_8 | 450.7 |
+| rollmean_4 | 6,381.5 |
+| lag_1 | 5,024.7 |
+| lag_52 | 1,664.7 |
+| IsHoliday | 1,623.6 |
+| lag_2 | 568.2 |
+| rollmean_8 | 386.8 |
 
 **Reading this honestly:** the model leans heavily on recent short-window
 history (`rollmean_4`, `lag_1`) — unsurprising for a demand series, but it
 means the model is closer to "a well-regularized recent-average" than to
 "a rich, holiday/promo-driven understanding of demand" for most series;
-`IsHoliday` and `lag_52` (the same week last year) matter, but roughly a
-third as much. This ranking is computed **in-sample** (the final serving
+`lag_52` (the same week last year) and `IsHoliday` matter, but only about a
+quarter as much. This ranking is computed **in-sample** (the final serving
 model is trained on all available history, so there's no leftover
 held-out slice to score against without shrinking training data) —
 disclosed as a limitation in `src/explain.py`'s docstring rather than
 presented as a held-out result.
 
-## 6. What a next iteration would change
+## 6. Agent tool-routing eval
+
+`tests/test_agent.py` checks a handful of individual routing assertions, but
+that's a regression test, not a benchmark you can quote a number from. So
+there's a separate, standalone eval: `scripts/run_agent_eval.py` runs a
+labeled set of 37 natural-language questions (`data/agent_eval_set.json`)
+against the deterministic `MockLLM` router, checking both which tool it
+called and whether it extracted the right arguments, and writes the real
+result to `reports/agent_eval_report.json` -- every pipeline run
+(`scripts/run_pipeline.py`) regenerates it, and `tests/test_agent_eval.py`
+fails CI if it regresses.
+
+| | Result |
+|---|---|
+| Overall (all 37 cases) | 37/37 (100%) |
+| Real cases (32, excl. known limitations) | 32/32 (100%) |
+| Documented known-limitation cases | 5/5 behave as documented |
+
+**Reading this honestly:** 100% isn't "the router is flawless" -- it's
+"the router does exactly what its regex/keyword design says it does,
+including 5 documented cases where that design falls short," which the eval
+set encodes explicitly rather than hiding:
+
+1. Spelled-out numbers aren't parsed (`"store four"` doesn't extract `store=4`).
+2. Only the first store number in a question is ever used -- no multi-entity
+   comparison (`"compare store 3 and store 7"` silently answers about store 3 only).
+3. A compound question ("is this anomalous, and why?") gets exactly one tool
+   call -- whichever branch's keyword check runs first in the if/elif chain
+   wins, never both.
+4. The `top_movers` branch only fires on four fixed trigger phrases; natural
+   phrasing like "top gainers" falls through to the default forecast tool
+   instead of erroring or asking for clarification.
+5. The department regex requires the literal word "dept"/"department";
+   shorthand like `"dep.5"` fails to parse and silently falls back to a
+   default rather than parsing 5 or surfacing an error.
+
+None of these are hidden -- see each case's `note` field in
+`data/agent_eval_set.json`. This is exactly the gap a real LLM backend
+(`AnthropicLLM`/`OpenAILLM`/`BedrockLLM`) is meant to close: `run_agent_eval.py`
+runs the identical 37-question benchmark against whichever real backend is
+configured via `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`BEDROCK_MODEL_ID`, and
+reports that honestly too -- skipped, not fabricated, when no key is present
+(see `infra/README.md`'s disclosure section for why no real API call has
+been made from inside this build sandbox).
+
+## 7. What a next iteration would change
 
 - Fit Holt-Winters smoothing constants via MLE (statsmodels) instead of a
   small fixed grid, closing most of its gap to the other two models.
@@ -208,3 +291,7 @@ presented as a held-out result.
   global threshold either over-flags noisy series or under-flags quiet ones.
 - Wire the monitoring simulation to a real scheduler against live incoming
   weekly data instead of replaying historical backtest cutoffs.
+- Close the 5 documented `MockLLM` router gaps (§6) directly, or simply
+  default to a real LLM backend whenever a key is present in a deployed
+  environment -- the eval harness exists precisely to measure whether that
+  swap actually improves tool-selection accuracy instead of assuming it does.

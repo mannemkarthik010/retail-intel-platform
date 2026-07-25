@@ -28,6 +28,14 @@ data/generate_data.py                     scripts/run_pipeline.py
                                                     v
                                    reports/monitoring_fleet_log.csv
                                    reports/monitoring_series_alerts.csv
+                                                    |
+                                                    v
+                                     scripts/retrain_flagged.py
+                                                    |
+                                                    v
+                          reports/selected_model.json (updated in place)
+                          reports/current_forecasts.csv (updated in place)
+                          reports/retraining_log.jsonl (append-only audit trail)
 
                               (all of the above are OFFLINE / BATCH)
                                                     |
@@ -183,6 +191,25 @@ explicitly in the Condor JD ("correctness and auditability are non-negotiable")
 generalized to any domain where "trust the AI's answer" needs to mean
 "and here's exactly how it got there."
 
+**Resilience and cost tracking for the three real backends.** A live API call
+can fail transiently (a momentary rate limit, a dropped connection, a 5xx),
+and every real-LLM call costs real tokens. Both are handled in `src/agent.py`,
+shared across `AnthropicLLM`/`OpenAILLM`/`BedrockLLM`:
+
+- `_retry_with_backoff()` retries only actually-transient failures (429/5xx
+  HTTP status, connection/timeout errors, Bedrock's `ThrottlingException`/
+  `ServiceUnavailable`/etc.) with exponential backoff + jitter, up to 4
+  attempts. A 401 (bad key) or 400 (malformed request) is never retried --
+  retrying something that will fail identically four times just burns
+  latency and, for a paid API, money.
+- Every real API response's token usage is accumulated onto the `AgentTrace`
+  (`token_usage`, `estimated_cost_usd`, `retries`) across every tool-calling
+  turn in a single `ask()` call, and persisted to `reports/llm_usage.jsonl`
+  (skipped for `MockLLM`, which never makes a network call and so has
+  nothing to cost). Pricing (`LLM_PRICING_USD_PER_1M_TOKENS`) is disclosed as
+  approximate/illustrative, not billing-accurate -- provider list prices
+  change, and this is for cost-awareness in the trace, not an invoice.
+
 ## AWS deployment
 
 `infra/` deploys this platform onto AWS using the exact services Condor's
@@ -198,11 +225,63 @@ spirit as the Docker/CI disclosure below — an explicit list of what's
 verified by a passing test run here versus what's "written to spec, not
 observed running."
 
+## Closing the monitoring loop
+
+`scripts/run_monitoring_sim.py` flags individual series whose *deployed*
+model's accuracy has drifted (see `docs/EVAL_REPORT.md` §3) -- but a flagged
+series that nobody acts on is just a CSV nobody reads. `scripts/retrain_flagged.py`
+runs immediately after it and turns each flag into a decision:
+
+1. For each flagged series, look up its three candidate models' WAPE at the
+   exact latest rolling-origin cutoff the drift alert itself fired on
+   (`reports/per_cutoff_metrics.csv` -- already computed, leakage-free, by
+   the original `run_backtest()`, so nothing new is scored here that risks
+   the kind of lookahead leakage `tests/test_features.py` explicitly guards
+   against elsewhere).
+2. If a different model now wins at that latest cutoff, re-select it,
+   recompute that series' forward forecast (reusing the already-persisted
+   `gbm_point`/`gbm_q10`/`gbm_q90` models -- see below for why this
+   deliberately does NOT refit the global GBM), and update
+   `reports/selected_model.json` + `reports/current_forecasts.csv` for that
+   series only.
+3. Either way -- reselected or left alone -- append one line to
+   `reports/retraining_log.jsonl`, an audit trail in the same spirit as
+   `reports/agent_traces.jsonl`. "Reviewed and confirmed the deployed model
+   is still best" is a real, useful, loggable outcome, not a null result to
+   hide.
+
+**Why this doesn't refit the global GBM.** The GBM is trained ONCE across
+all 240 series (see "Why a global model instead of one model per series"
+above) -- refitting it is what `scripts/run_pipeline.py` does for the whole
+fleet, not something that makes sense to trigger for a handful of flagged
+series. `retrain_flagged.py` reuses the persisted model as-is; what it
+retrains, in the literal sense, is the *classical* per-series
+candidates (seasonal-naive/Holt-Winters are recomputed directly from each
+series' latest history, which is all "fitting" ever meant for them) and the
+*selection decision* among all three.
+
+**Why "latest single cutoff" instead of a wider recent window.** It's
+noisier than the 6-cutoff mean the original selection uses, but it's
+literally the metric the drift alert fired on -- see
+`docs/EVAL_REPORT.md`'s "what a next iteration would change" for the
+wider-window refinement this doesn't attempt.
+
 ## What's still a demo, not a production system
 
 Being direct about the gap matters more than papering over it:
 
-- No authentication, rate limiting, or multi-tenancy on the API.
+- Still **no authentication, rate limiting, or multi-tenancy** on the API --
+  that gap is real and unaddressed. What IS handled now (`app/server.py`):
+  every query param is validated with a clean 400 JSON error instead of an
+  unhandled 500 on bad input, request bodies are size-capped
+  (`MAX_CONTENT_LENGTH`), CORS is opt-in via an explicit origin allowlist
+  (`CORS_ALLOWED_ORIGINS`, unset by default = no cross-origin access) rather
+  than wide open, every request is logged with method/path/status/duration,
+  and both HTTP errors and unexpected exceptions come back as JSON, never
+  Flask's default HTML error/debug page. None of that is a substitute for
+  auth or rate limiting -- it closes the "malformed input 500s the server"
+  and "errors leak an HTML stack trace" gaps, not the "who is allowed to
+  call this at all" gap.
 - The Flask dev server is explicitly not a production WSGI server (the
   console warns about this on startup). `requirements.txt` and the
   `Dockerfile` both document the gunicorn swap-in (commented out, with the
