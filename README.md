@@ -4,13 +4,11 @@
 
 ![tests](https://img.shields.io/badge/tests-133%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
-![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF)
+![CI](https://github.com/mannemkarthik010/retail-intel-platform/actions/workflows/tests.yml/badge.svg)
 ![docker](https://img.shields.io/badge/docker-ready-2496ED)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 ![deps](https://img.shields.io/badge/dashboard-zero%20external%20JS-1BAF7A)
 ![aws](https://img.shields.io/badge/AWS-SageMaker%20%7C%20Bedrock%20%7C%20Lambda-FF9900)
-
-> Once this is pushed to GitHub, point the CI badge at `https://github.com/<you>/<repo>/actions/workflows/tests.yml/badge.svg` so it goes live instead of static.
 
 ![Dashboard demo](reports/figures/dashboard_demo.gif)
 
