@@ -10,6 +10,8 @@
 ![deps](https://img.shields.io/badge/dashboard-zero%20external%20JS-1BAF7A)
 ![aws](https://img.shields.io/badge/AWS-SageMaker%20%7C%20Bedrock%20%7C%20Lambda-FF9900)
 
+**▶ Live demo: [retail-intel-platform.vercel.app](https://retail-intel-platform.vercel.app)** , load a series, ask the agent a question, expand the audit trail. Running the same `app/server.py` this repo runs locally, deployed as a serverless function (`api/index.py`).
+
 ![Dashboard demo](reports/figures/dashboard_demo.gif)
 
 *Live interaction: load a series, ask the agent a question in plain English, expand the audit trail to see exactly which tool it called and why. No Chart.js, no CDN , the charts are hand-rolled SVG.*
