@@ -1,0 +1,28 @@
+# Trimmed runtime-only dependency set for the Vercel serverless function --
+# Vercel's Python builder prefers a requirements.txt colocated with the
+# entrypoint over the repo-root one, which also includes matplotlib/boto3
+# (report-figure generation and the optional Bedrock backend, neither
+# needed to serve requests) that would otherwise bloat the deployed bundle.
+# See ../requirements.txt for the full local-dev dependency set.
+#
+# WHY THESE ARE PINNED EXACTLY (not >=), unlike ../requirements.txt:
+# reports/models/*.joblib are pickled scikit-learn estimators, and
+# unpickling requires the SAME library internals that pickled them.
+# Deploying with a floating `scikit-learn>=1.3` installed a different
+# version than the 1.8.0 that trained/pickled these artifacts, and
+# /api/explain + /api/simulate died on every request with
+# `ModuleNotFoundError: No module named '_loss'` -- sklearn had moved that
+# internal module between versions, so the pickle referenced a path that no
+# longer existed. That is textbook train/serve skew: the code was fine, the
+# model file was fine, the ENVIRONMENTS disagreed.
+#
+# So these pins must stay in lockstep with whatever environment last ran
+# scripts/run_pipeline.py to regenerate reports/models/*.joblib. If you
+# retrain on a newer scikit-learn, bump the pin here in the same commit.
+flask==3.1.3
+pandas==2.3.3
+numpy==2.4.2
+scipy==1.17.1
+scikit-learn==1.8.0
+joblib==1.5.3
+requests==2.32.3

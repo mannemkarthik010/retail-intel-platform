@@ -445,6 +445,9 @@ class AgentTrace:
     token_usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     estimated_cost_usd: Optional[float] = None
     retries: int = 0
+    # Set by persist(): False when the local append failed (read-only
+    # serverless filesystem) -- see persist()'s docstring.
+    persisted: Optional[bool] = None
 
     def log_step(self, tool: str, args: dict, result: dict, reasoning: str = ""):
         self.steps.append({
@@ -475,19 +478,46 @@ class AgentTrace:
                 "retries": self.retries}
 
     def persist(self):
-        REPORTS.mkdir(exist_ok=True)
-        with open(REPORTS / "agent_traces.jsonl", "a") as f:
-            f.write(json.dumps(self.to_dict()) + "\n")
-        # Only real (non-mock) backends ever accumulate token usage --
-        # skip the cost/usage log entirely for MockLLM rather than
-        # appending meaningless all-zero rows to it.
-        if self.token_usage["input_tokens"] or self.token_usage["output_tokens"]:
-            with open(REPORTS / "llm_usage.jsonl", "a") as f:
-                f.write(json.dumps({
-                    "ts": round(time.time(), 3), "backend": self.backend, "model": self.model,
-                    "question": self.question, **self.token_usage,
-                    "estimated_cost_usd": self.estimated_cost_usd, "retries": self.retries,
-                }) + "\n")
+        """Appends this trace to the local audit log, and the token/cost row
+        to the usage log.
+
+        Degrades gracefully on a read-only filesystem instead of failing the
+        request. Serverless runtimes (Vercel, and Lambda outside /tmp) mount
+        the deployment bundle read-only, so a local append is impossible
+        there -- but the trace is ALSO returned in full to the caller by
+        `to_dict()` (that's what app/server.py's /api/ask responds with), so
+        auditability is preserved on the response path even when the
+        write-behind log isn't available. A production deployment would ship
+        traces to CloudWatch/S3/a database rather than a local file anyway;
+        losing the local file is a deployment-environment limitation, not a
+        loss of the audit trail itself.
+
+        `AGENT_TRACE_DIR` overrides the destination (e.g. `/tmp` on a
+        serverless host, the one writable path there)."""
+        target = Path(os.environ.get("AGENT_TRACE_DIR", REPORTS))
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            with open(target / "agent_traces.jsonl", "a") as f:
+                f.write(json.dumps(self.to_dict()) + "\n")
+            # Only real (non-mock) backends ever accumulate token usage --
+            # skip the cost/usage log entirely for MockLLM rather than
+            # appending meaningless all-zero rows to it.
+            if self.token_usage["input_tokens"] or self.token_usage["output_tokens"]:
+                with open(target / "llm_usage.jsonl", "a") as f:
+                    f.write(json.dumps({
+                        "ts": round(time.time(), 3), "backend": self.backend, "model": self.model,
+                        "question": self.question, **self.token_usage,
+                        "estimated_cost_usd": self.estimated_cost_usd, "retries": self.retries,
+                    }) + "\n")
+            self.persisted = True
+        except OSError as e:
+            # Read-only filesystem, or no permission -- expected on
+            # serverless. Surface it once per call on stderr so it's
+            # visible in logs, but never fail the user's request over an
+            # append to a log file.
+            print(f"[agent] trace not persisted to {target} ({e.strerror}); "
+                  f"returned in the response payload instead", file=sys.stderr)
+            self.persisted = False
 
 
 # --------------------------------------------------------------------------

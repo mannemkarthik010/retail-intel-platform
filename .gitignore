@@ -19,3 +19,5 @@ infra/terraform/*.tfstate
 infra/terraform/*.tfstate.*
 infra/terraform/terraform.tfvars
 infra/terraform/build/
+.vercel
+.env*

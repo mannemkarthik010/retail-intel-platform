@@ -1,0 +1,22 @@
+# Keep the serverless bundle small. Vercel prunes ("optimizes") dependencies
+# when the bundle exceeds its limit, and that pruning is what broke
+# scikit-learn's compiled `_loss` extension at unpickle time -- so trimming
+# what ships is a correctness fix here, not just a speed one.
+#
+# The app only needs: api/, app/, src/, data/*.csv + generate_data.py,
+# reports/*.csv + *.json + models/*.joblib.
+.git
+.github
+tests
+infra
+docs
+scripts/make_*
+scripts/run_agent_eval.py
+scripts/run_anomaly_scan.py
+reports/figures
+reports/*.jsonl
+*.pdf
+Dockerfile
+.dockerignore
+**/__pycache__
+*.pyc

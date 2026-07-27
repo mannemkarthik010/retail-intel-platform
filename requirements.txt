@@ -1,10 +1,24 @@
 # Core
-pandas>=2.0
-numpy>=1.24
-scipy>=1.10
-scikit-learn>=1.3
-matplotlib>=3.7
-joblib>=1.3   # persists the trained point/quantile GBMs (reports/models/*.joblib)
+#
+# scikit-learn/numpy/scipy/joblib are PINNED, not floating, and that matters:
+# reports/models/*.joblib are pickled scikit-learn estimators, and unpickling
+# one requires the same library internals that pickled it. Deploying this to
+# a host that resolved `scikit-learn>=1.3` to a different version than the
+# 1.8.0 these artifacts were trained on made /api/explain and /api/simulate
+# fail on every request with `ModuleNotFoundError: No module named '_loss'`
+# -- sklearn had relocated that internal Cython module, so the pickle
+# referenced a path that no longer existed. Textbook train/serve skew: the
+# code was fine, the model file was fine, the two ENVIRONMENTS disagreed.
+#
+# If you retrain (scripts/run_pipeline.py) on newer versions, bump these
+# pins in the same commit that commits the regenerated .joblib files.
+pandas==2.3.3
+numpy==2.4.2
+scipy==1.17.1
+scikit-learn==1.8.0
+matplotlib>=3.7   # figures only (scripts/make_report_figures.py), never
+                  # imported on the serving path -- safe to float
+joblib==1.5.3 # persists the trained point/quantile GBMs (reports/models/*.joblib)
               # for reuse by src/explain.py and src/scenario.py -- see scripts/run_pipeline.py
 
 # Serving

@@ -434,6 +434,34 @@ class TestRetryBackoffAndCostTracking(unittest.TestCase):
                 self.assertEqual(logged["input_tokens"], 10)
                 self.assertEqual(logged["output_tokens"], 5)
 
+    def test_persist_survives_read_only_filesystem(self):
+        """Regression test for a real failure found deploying to Vercel:
+        serverless runtimes mount the deployment bundle read-only, so
+        appending to reports/agent_traces.jsonl raised OSError and turned
+        every /api/ask call into a 500. Persisting is best-effort now --
+        the trace still comes back in the response payload."""
+        from src import agent as agent_mod
+
+        trace = agent_mod.AgentTrace(question="q", backend="mock", final_answer="a")
+        with patch("builtins.open", side_effect=OSError(30, "Read-only file system")):
+            with patch.object(Path, "mkdir", return_value=None):
+                trace.persist()  # must not raise
+
+        self.assertFalse(trace.persisted)
+        self.assertEqual(trace.to_dict()["final_answer"], "a")  # audit trail intact on the response path
+
+    def test_persist_honors_agent_trace_dir_override(self):
+        import tempfile
+        from src import agent as agent_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested"
+            with patch.dict("os.environ", {"AGENT_TRACE_DIR": str(target)}, clear=False):
+                trace = agent_mod.AgentTrace(question="q", backend="mock", final_answer="a")
+                trace.persist()
+            self.assertTrue(trace.persisted)
+            self.assertTrue((target / "agent_traces.jsonl").exists())
+
     def test_anthropic_answer_retries_transient_error_then_succeeds_and_tracks_usage(self):
         """Integration test: the first HTTP call raises a retryable 500,
         the second succeeds with a final text answer -- confirms
