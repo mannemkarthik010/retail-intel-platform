@@ -1,0 +1,665 @@
+{
+  "environment": {
+    "machine": "arm64 macOS 26.6.2",
+    "cpu_cores": 10,
+    "python": "3.13.9",
+    "scikit_learn": "1.8.0",
+    "pandas": "2.3.3",
+    "wsgi_server": "gunicorn 27.0.1, 4 sync workers",
+    "load_generator": "locust 2.47.0, headless",
+    "profiler": "cProfile (py-spy requires root on macOS, so it was not usable here)",
+    "note": "Client and server share one laptop, so these are relative, same-box before/after numbers, not absolute capacity figures for any real host."
+  },
+  "load_test": {
+    "shape": "closed loop; task weights in bench/locustfile.py; 60s per run after warming every worker on every route",
+    "runs": {
+      "baseline": {
+        "/api/anomalies": {
+          "p50_ms": 840.0,
+          "p95_ms": 1700.0,
+          "p99_ms": 1900.0,
+          "rps": 2.81,
+          "requests": 165,
+          "failures": 0
+        },
+        "/api/ask (drivers)": {
+          "p50_ms": 2200.0,
+          "p95_ms": 3300.0,
+          "p99_ms": 3300.0,
+          "rps": 0.48,
+          "requests": 28,
+          "failures": 0
+        },
+        "/api/ask (top_movers)": {
+          "p50_ms": 1100.0,
+          "p95_ms": 1800.0,
+          "p99_ms": 2000.0,
+          "rps": 0.92,
+          "requests": 54,
+          "failures": 0
+        },
+        "/api/eval/summary": {
+          "p50_ms": 770.0,
+          "p95_ms": 1400.0,
+          "p99_ms": 1700.0,
+          "rps": 0.8,
+          "requests": 47,
+          "failures": 0
+        },
+        "/api/explain": {
+          "p50_ms": 2100.0,
+          "p95_ms": 3200.0,
+          "p99_ms": 4000.0,
+          "rps": 1.87,
+          "requests": 110,
+          "failures": 0
+        },
+        "/api/forecast": {
+          "p50_ms": 750.0,
+          "p95_ms": 1600.0,
+          "p99_ms": 1800.0,
+          "rps": 4.85,
+          "requests": 285,
+          "failures": 0
+        },
+        "/api/history": {
+          "p50_ms": 820.0,
+          "p95_ms": 1700.0,
+          "p99_ms": 1900.0,
+          "rps": 3.01,
+          "requests": 177,
+          "failures": 0
+        },
+        "/api/series": {
+          "p50_ms": 700.0,
+          "p95_ms": 1500.0,
+          "p99_ms": 1700.0,
+          "rps": 1.09,
+          "requests": 64,
+          "failures": 0
+        },
+        "/api/simulate": {
+          "p50_ms": 910.0,
+          "p95_ms": 1900.0,
+          "p99_ms": 2800.0,
+          "rps": 1.46,
+          "requests": 86,
+          "failures": 0
+        },
+        "Aggregated": {
+          "p50_ms": 900.0,
+          "p95_ms": 2400.0,
+          "p99_ms": 2900.0,
+          "rps": 17.29,
+          "requests": 1016,
+          "failures": 0
+        }
+      },
+      "optimized": {
+        "/api/anomalies": {
+          "p50_ms": 2.0,
+          "p95_ms": 3.0,
+          "p99_ms": 5.0,
+          "rps": 26.52,
+          "requests": 1567,
+          "failures": 0
+        },
+        "/api/ask (drivers)": {
+          "p50_ms": 5.0,
+          "p95_ms": 21.0,
+          "p99_ms": 25.0,
+          "rps": 4.57,
+          "requests": 270,
+          "failures": 0
+        },
+        "/api/ask (top_movers)": {
+          "p50_ms": 2.0,
+          "p95_ms": 3.0,
+          "p99_ms": 5.0,
+          "rps": 8.28,
+          "requests": 489,
+          "failures": 0
+        },
+        "/api/eval/summary": {
+          "p50_ms": 1.0,
+          "p95_ms": 2.0,
+          "p99_ms": 3.0,
+          "rps": 7.73,
+          "requests": 457,
+          "failures": 0
+        },
+        "/api/explain": {
+          "p50_ms": 5.0,
+          "p95_ms": 22.0,
+          "p99_ms": 26.0,
+          "rps": 17.3,
+          "requests": 1022,
+          "failures": 0
+        },
+        "/api/forecast": {
+          "p50_ms": 2.0,
+          "p95_ms": 3.0,
+          "p99_ms": 4.0,
+          "rps": 43.56,
+          "requests": 2574,
+          "failures": 0
+        },
+        "/api/history": {
+          "p50_ms": 1.0,
+          "p95_ms": 3.0,
+          "p99_ms": 4.0,
+          "rps": 25.94,
+          "requests": 1533,
+          "failures": 0
+        },
+        "/api/series": {
+          "p50_ms": 1.0,
+          "p95_ms": 2.0,
+          "p99_ms": 4.0,
+          "rps": 8.33,
+          "requests": 492,
+          "failures": 0
+        },
+        "/api/simulate": {
+          "p50_ms": 12.0,
+          "p95_ms": 17.0,
+          "p99_ms": 22.0,
+          "rps": 12.57,
+          "requests": 743,
+          "failures": 0
+        },
+        "Aggregated": {
+          "p50_ms": 2.0,
+          "p95_ms": 17.0,
+          "p99_ms": 21.0,
+          "rps": 154.8,
+          "requests": 9147,
+          "failures": 0
+        }
+      },
+      "ablation-threadpin-only": {
+        "/api/anomalies": {
+          "p50_ms": 3.0,
+          "p95_ms": 84.0,
+          "p99_ms": 180.0,
+          "rps": 21.55,
+          "requests": 1274,
+          "failures": 0
+        },
+        "/api/ask (drivers)": {
+          "p50_ms": 35.0,
+          "p95_ms": 130.0,
+          "p99_ms": 230.0,
+          "rps": 3.57,
+          "requests": 211,
+          "failures": 0
+        },
+        "/api/ask (top_movers)": {
+          "p50_ms": 310.0,
+          "p95_ms": 420.0,
+          "p99_ms": 500.0,
+          "rps": 6.58,
+          "requests": 389,
+          "failures": 0
+        },
+        "/api/eval/summary": {
+          "p50_ms": 1.0,
+          "p95_ms": 94.0,
+          "p99_ms": 210.0,
+          "rps": 6.95,
+          "requests": 411,
+          "failures": 0
+        },
+        "/api/explain": {
+          "p50_ms": 35.0,
+          "p95_ms": 120.0,
+          "p99_ms": 230.0,
+          "rps": 13.28,
+          "requests": 785,
+          "failures": 0
+        },
+        "/api/forecast": {
+          "p50_ms": 2.0,
+          "p95_ms": 82.0,
+          "p99_ms": 190.0,
+          "rps": 33.87,
+          "requests": 2003,
+          "failures": 0
+        },
+        "/api/history": {
+          "p50_ms": 4.0,
+          "p95_ms": 100.0,
+          "p99_ms": 190.0,
+          "rps": 20.07,
+          "requests": 1187,
+          "failures": 0
+        },
+        "/api/series": {
+          "p50_ms": 2.0,
+          "p95_ms": 60.0,
+          "p99_ms": 150.0,
+          "rps": 7.02,
+          "requests": 415,
+          "failures": 0
+        },
+        "/api/simulate": {
+          "p50_ms": 10.0,
+          "p95_ms": 110.0,
+          "p99_ms": 230.0,
+          "rps": 9.71,
+          "requests": 574,
+          "failures": 0
+        },
+        "Aggregated": {
+          "p50_ms": 4.0,
+          "p95_ms": 290.0,
+          "p99_ms": 330.0,
+          "rps": 122.59,
+          "requests": 7249,
+          "failures": 0
+        }
+      },
+      "ablation-code-only": {
+        "/api/anomalies": {
+          "p50_ms": 100.0,
+          "p95_ms": 380.0,
+          "p99_ms": 520.0,
+          "rps": 10.06,
+          "requests": 595,
+          "failures": 0
+        },
+        "/api/ask (drivers)": {
+          "p50_ms": 540.0,
+          "p95_ms": 930.0,
+          "p99_ms": 1100.0,
+          "rps": 1.5,
+          "requests": 89,
+          "failures": 0
+        },
+        "/api/ask (top_movers)": {
+          "p50_ms": 110.0,
+          "p95_ms": 380.0,
+          "p99_ms": 470.0,
+          "rps": 3.38,
+          "requests": 200,
+          "failures": 0
+        },
+        "/api/eval/summary": {
+          "p50_ms": 110.0,
+          "p95_ms": 400.0,
+          "p99_ms": 540.0,
+          "rps": 3.55,
+          "requests": 210,
+          "failures": 0
+        },
+        "/api/explain": {
+          "p50_ms": 500.0,
+          "p95_ms": 810.0,
+          "p99_ms": 910.0,
+          "rps": 6.37,
+          "requests": 377,
+          "failures": 0
+        },
+        "/api/forecast": {
+          "p50_ms": 120.0,
+          "p95_ms": 400.0,
+          "p99_ms": 500.0,
+          "rps": 16.4,
+          "requests": 970,
+          "failures": 0
+        },
+        "/api/history": {
+          "p50_ms": 110.0,
+          "p95_ms": 390.0,
+          "p99_ms": 490.0,
+          "rps": 10.09,
+          "requests": 597,
+          "failures": 0
+        },
+        "/api/series": {
+          "p50_ms": 110.0,
+          "p95_ms": 440.0,
+          "p99_ms": 530.0,
+          "rps": 3.41,
+          "requests": 202,
+          "failures": 0
+        },
+        "/api/simulate": {
+          "p50_ms": 330.0,
+          "p95_ms": 610.0,
+          "p99_ms": 700.0,
+          "rps": 5.61,
+          "requests": 332,
+          "failures": 0
+        },
+        "Aggregated": {
+          "p50_ms": 160.0,
+          "p95_ms": 590.0,
+          "p99_ms": 770.0,
+          "rps": 60.38,
+          "requests": 3572,
+          "failures": 0
+        }
+      },
+      "baseline-light": {
+        "/api/anomalies": {
+          "p50_ms": 2.0,
+          "p95_ms": 3.0,
+          "p99_ms": 4.0,
+          "rps": 2.42,
+          "requests": 144,
+          "failures": 0
+        },
+        "/api/ask (drivers)": {
+          "p50_ms": 1100.0,
+          "p95_ms": 1400.0,
+          "p99_ms": 1600.0,
+          "rps": 0.49,
+          "requests": 29,
+          "failures": 0
+        },
+        "/api/ask (top_movers)": {
+          "p50_ms": 280.0,
+          "p95_ms": 310.0,
+          "p99_ms": 320.0,
+          "rps": 0.67,
+          "requests": 40,
+          "failures": 0
+        },
+        "/api/eval/summary": {
+          "p50_ms": 1.0,
+          "p95_ms": 1.0,
+          "p99_ms": 2.0,
+          "rps": 1.11,
+          "requests": 66,
+          "failures": 0
+        },
+        "/api/explain": {
+          "p50_ms": 970.0,
+          "p95_ms": 1600.0,
+          "p99_ms": 1700.0,
+          "rps": 1.41,
+          "requests": 84,
+          "failures": 0
+        },
+        "/api/forecast": {
+          "p50_ms": 1.0,
+          "p95_ms": 2.0,
+          "p99_ms": 3.0,
+          "rps": 3.84,
+          "requests": 228,
+          "failures": 0
+        },
+        "/api/history": {
+          "p50_ms": 3.0,
+          "p95_ms": 4.0,
+          "p99_ms": 8.0,
+          "rps": 2.52,
+          "requests": 150,
+          "failures": 0
+        },
+        "/api/series": {
+          "p50_ms": 1.0,
+          "p95_ms": 2.0,
+          "p99_ms": 2.0,
+          "rps": 0.76,
+          "requests": 45,
+          "failures": 0
+        },
+        "/api/simulate": {
+          "p50_ms": 110.0,
+          "p95_ms": 230.0,
+          "p99_ms": 240.0,
+          "rps": 1.26,
+          "requests": 75,
+          "failures": 0
+        },
+        "Aggregated": {
+          "p50_ms": 3.0,
+          "p95_ms": 1100.0,
+          "p99_ms": 1500.0,
+          "rps": 14.49,
+          "requests": 861,
+          "failures": 0
+        }
+      },
+      "optimized-light": {
+        "/api/anomalies": {
+          "p50_ms": 4.0,
+          "p95_ms": 7.0,
+          "p99_ms": 16.0,
+          "rps": 4.98,
+          "requests": 295,
+          "failures": 0
+        },
+        "/api/ask (drivers)": {
+          "p50_ms": 33.0,
+          "p95_ms": 45.0,
+          "p99_ms": 55.0,
+          "rps": 0.71,
+          "requests": 42,
+          "failures": 0
+        },
+        "/api/ask (top_movers)": {
+          "p50_ms": 4.0,
+          "p95_ms": 7.0,
+          "p99_ms": 51.0,
+          "rps": 1.49,
+          "requests": 88,
+          "failures": 0
+        },
+        "/api/eval/summary": {
+          "p50_ms": 3.0,
+          "p95_ms": 7.0,
+          "p99_ms": 13.0,
+          "rps": 1.62,
+          "requests": 96,
+          "failures": 0
+        },
+        "/api/explain": {
+          "p50_ms": 29.0,
+          "p95_ms": 43.0,
+          "p99_ms": 97.0,
+          "rps": 2.99,
+          "requests": 177,
+          "failures": 0
+        },
+        "/api/forecast": {
+          "p50_ms": 4.0,
+          "p95_ms": 7.0,
+          "p99_ms": 25.0,
+          "rps": 7.95,
+          "requests": 471,
+          "failures": 0
+        },
+        "/api/history": {
+          "p50_ms": 4.0,
+          "p95_ms": 6.0,
+          "p99_ms": 11.0,
+          "rps": 5.13,
+          "requests": 304,
+          "failures": 0
+        },
+        "/api/series": {
+          "p50_ms": 3.0,
+          "p95_ms": 5.0,
+          "p99_ms": 6.0,
+          "rps": 1.79,
+          "requests": 106,
+          "failures": 0
+        },
+        "/api/simulate": {
+          "p50_ms": 22.0,
+          "p95_ms": 41.0,
+          "p99_ms": 86.0,
+          "rps": 2.47,
+          "requests": 146,
+          "failures": 0
+        },
+        "Aggregated": {
+          "p50_ms": 5.0,
+          "p95_ms": 36.0,
+          "p99_ms": 49.0,
+          "rps": 29.13,
+          "requests": 1725,
+          "failures": 0
+        }
+      }
+    }
+  },
+  "in_process_single_threaded": {
+    "note": "No HTTP/queueing; OMP pinned in both trees, so this isolates the code changes from the thread-pool fix.",
+    "before": [
+      {
+        "endpoint": "GET /api/forecast",
+        "n": 60,
+        "p50": 0.54,
+        "p95": 0.58,
+        "mean": 0.57,
+        "max": 1.92
+      },
+      {
+        "endpoint": "GET /api/anomalies",
+        "n": 60,
+        "p50": 1.47,
+        "p95": 1.63,
+        "mean": 1.48,
+        "max": 1.69
+      },
+      {
+        "endpoint": "GET /api/history",
+        "n": 60,
+        "p50": 2.36,
+        "p95": 2.61,
+        "mean": 2.4,
+        "max": 2.71
+      },
+      {
+        "endpoint": "GET /api/series",
+        "n": 60,
+        "p50": 0.53,
+        "p95": 0.61,
+        "mean": 0.54,
+        "max": 0.85
+      },
+      {
+        "endpoint": "GET /api/eval/summary",
+        "n": 60,
+        "p50": 0.18,
+        "p95": 0.21,
+        "mean": 0.18,
+        "max": 0.26
+      },
+      {
+        "endpoint": "GET /api/simulate",
+        "n": 40,
+        "p50": 8.05,
+        "p95": 12.71,
+        "mean": 8.93,
+        "max": 13.14
+      },
+      {
+        "endpoint": "POST /api/ask (top_movers)",
+        "n": 20,
+        "p50": 294.25,
+        "p95": 314.78,
+        "mean": 296.03,
+        "max": 348.66
+      },
+      {
+        "endpoint": "GET /api/explain (cold series)",
+        "n": 40,
+        "p50": 33.89,
+        "p95": 42.29,
+        "mean": 34.69,
+        "max": 47.71
+      },
+      {
+        "endpoint": "GET /api/explain (warm series)",
+        "n": 60,
+        "p50": 33.26,
+        "p95": 45.39,
+        "mean": 34.87,
+        "max": 58.65
+      }
+    ],
+    "after": [
+      {
+        "endpoint": "GET /api/forecast",
+        "n": 60,
+        "p50": 0.46,
+        "p95": 0.62,
+        "mean": 0.5,
+        "max": 2.26
+      },
+      {
+        "endpoint": "GET /api/anomalies",
+        "n": 60,
+        "p50": 0.44,
+        "p95": 0.69,
+        "mean": 0.47,
+        "max": 1.22
+      },
+      {
+        "endpoint": "GET /api/history",
+        "n": 60,
+        "p50": 0.3,
+        "p95": 0.43,
+        "mean": 0.32,
+        "max": 0.47
+      },
+      {
+        "endpoint": "GET /api/series",
+        "n": 60,
+        "p50": 0.12,
+        "p95": 0.18,
+        "mean": 0.13,
+        "max": 0.26
+      },
+      {
+        "endpoint": "GET /api/eval/summary",
+        "n": 60,
+        "p50": 0.2,
+        "p95": 0.29,
+        "mean": 0.21,
+        "max": 0.38
+      },
+      {
+        "endpoint": "GET /api/simulate",
+        "n": 40,
+        "p50": 7.77,
+        "p95": 8.25,
+        "mean": 7.88,
+        "max": 8.46
+      },
+      {
+        "endpoint": "POST /api/ask (top_movers)",
+        "n": 20,
+        "p50": 0.28,
+        "p95": 0.39,
+        "mean": 0.3,
+        "max": 0.45
+      },
+      {
+        "endpoint": "GET /api/explain (cold series)",
+        "n": 40,
+        "p50": 13.75,
+        "p95": 14.84,
+        "mean": 14.08,
+        "max": 25.13
+      },
+      {
+        "endpoint": "GET /api/explain (warm series)",
+        "n": 60,
+        "p50": 1.8,
+        "p95": 1.97,
+        "mean": 1.82,
+        "max": 2.08
+      }
+    ]
+  },
+  "correctness": {
+    "response_sweep": "3139 responses across every endpoint, all 240 series, every week_ahead, 4 scenario variants and the error paths: identical before/after except the agent trace's wall-clock `ts` field",
+    "tests": "145 passed (135 pre-existing + 10 new invariant tests in tests/test_perf_invariants.py)"
+  }
+}

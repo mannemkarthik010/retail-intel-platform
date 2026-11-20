@@ -25,6 +25,28 @@ import sys
 import time
 from pathlib import Path
 
+# Pin the native thread pools to one thread per worker process BEFORE
+# anything imports numpy/scikit-learn, because OpenMP and the BLAS
+# libraries size their pools at load time and ignore later changes.
+#
+# Why this matters here: scikit-learn's HistGradientBoostingRegressor
+# parallelises `predict` with OpenMP, which by default opens a pool as wide
+# as the machine's core count -- in EVERY worker process. Under a 4-worker
+# gunicorn serving concurrent requests that is 4 x 10 = 40 runnable threads
+# on 10 cores, and the resulting oversubscription dominated the measured
+# latency: /api/explain sat at ~970 ms p50 at 4 concurrent users while the
+# identical call took ~104 ms single-threaded in-process. This project's
+# inference batches are tiny (tens of rows, not millions), so the
+# intra-request parallelism was buying essentially nothing in return --
+# the right unit of parallelism for a request/response API is the
+# worker process, not the thread pool inside it.
+#
+# `setdefault`, so an operator who deliberately sets these in the
+# environment still wins. See the README's "Performance" section.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 from flask import Flask, g, jsonify, render_template, request, abort
 from werkzeug.exceptions import HTTPException
 
@@ -112,11 +134,20 @@ def health():
     return jsonify({"status": "ok"})
 
 
+_SERIES_LIST_CACHE = None
+
+
 @app.get("/api/series")
 def list_series():
-    ds = _store()
-    pairs = ds.forecasts[["Store", "Dept"]].drop_duplicates().sort_values(["Store", "Dept"])
-    return jsonify(pairs.to_dict("records"))
+    # Pure function of the forecast artifact, which this process holds
+    # fixed for its lifetime, so the drop_duplicates + sort only needs
+    # doing once rather than on every dashboard page load.
+    global _SERIES_LIST_CACHE
+    if _SERIES_LIST_CACHE is None:
+        ds = _store()
+        pairs = ds.forecasts[["Store", "Dept"]].drop_duplicates().sort_values(["Store", "Dept"])
+        _SERIES_LIST_CACHE = pairs.to_dict("records")
+    return jsonify(_SERIES_LIST_CACHE)
 
 
 @app.get("/api/forecast")
@@ -141,11 +172,20 @@ def history():
     weeks = _int_arg("weeks", 104, minimum=1)
     ds = _store()
     key = ds.series_key(store, dept)
-    df = ds.anomalies[ds.anomalies["series"] == key].sort_values("Date").tail(weeks)
+    df = ds.anomalies_for(key).tail(weeks)
+    # Column-at-a-time instead of `iterrows()`: iterrows builds a fresh
+    # mixed-dtype Series object per row (104 of them per default request),
+    # which is most of this endpoint's cost once the series lookup is
+    # indexed rather than scanned.
     return jsonify([
-        {"date": str(r["Date"].date()), "value": round(float(r["Weekly_Sales"]), 2),
-         "anomaly_type": r["anomaly_type"], "needs_investigation": bool(r["needs_investigation"])}
-        for _, r in df.iterrows()
+        {"date": d, "value": round(float(v), 2), "anomaly_type": t,
+         "needs_investigation": bool(f)}
+        for d, v, t, f in zip(
+            df["Date"].dt.strftime("%Y-%m-%d"),
+            df["Weekly_Sales"].to_numpy(),
+            df["anomaly_type"].to_numpy(),
+            df["needs_investigation"].to_numpy(),
+        )
     ])
 
 

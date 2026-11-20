@@ -1,0 +1,7 @@
+# Benchmarking-only dependencies, deliberately kept out of requirements.txt
+# so the application's own install stays unchanged by the perf work.
+#
+#   python -m venv .perf && ./.perf/bin/pip install -r bench/requirements.txt
+#   PERF_VENV=$PWD/.perf bench/run_load_test.sh my-run 20 60s
+gunicorn>=21.2      # the WSGI server the measurements run against (4 sync workers)
+locust>=2.30        # load generator; bench/locustfile.py is the task profile

@@ -21,3 +21,8 @@ infra/terraform/terraform.tfvars
 infra/terraform/build/
 .vercel
 .env*
+
+# locust per-second history is bulky and only useful while debugging a run;
+# the summary stats CSVs (and bench/results/summary.json) are what the
+# README cites, so those are committed and the history files are not.
+bench/results/*/stats_stats_history.csv

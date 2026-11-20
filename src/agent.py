@@ -48,6 +48,17 @@ if str(ROOT) not in sys.path:
 # src/scenario.py's docstring for why that one tool is different in kind.)
 # --------------------------------------------------------------------------
 class DataStore:
+    """A process-lifetime snapshot of the offline pipeline's artifacts.
+
+    Everything cached on this object is derived purely from those files, so
+    the derived caches are exactly as fresh as `self.anomalies` /
+    `self.forecasts` themselves: this class already only ever read them
+    once, at first use, and a pipeline re-run has always required a process
+    restart to be picked up. Memoizing derived values therefore introduces
+    no staleness that wasn't already there -- see the "Performance" section
+    of the README for the trade-off in full.
+    """
+
     def __init__(self):
         self.forecasts = pd.read_csv(REPORTS / "current_forecasts.csv", parse_dates=["forecast_date"])
         self.series_summary = pd.read_csv(REPORTS / "series_summary.csv")
@@ -56,9 +67,146 @@ class DataStore:
         self._raw = None
         self._point_gbm = None
         self._feature_medians = None
+        # Derived caches, all built lazily on first use.
+        self._future_cov = None
+        self._gbm_rows: dict[tuple[int, int], list] = {}
+        self._yoy_table = None
+        self._anom_sorted = None
+        self._anom_spans: dict[str, tuple[int, int]] = {}
+        self._fc_spans: dict[str, tuple[int, int]] = {}
+        self._fc_sorted = None
 
     def series_key(self, store: int, dept: int) -> str:
         return f"S{store:02d}_D{dept:02d}"
+
+    # ---- per-series lookups -------------------------------------------
+    # `anomaly_flags.csv` is ~49k rows and its `series` column is object
+    # dtype, so the natural `df[df["series"] == key]` costs a full
+    # element-wise comparison of 49k Python string objects on EVERY
+    # request. Instead: sort by (series, Date) once, record each series'
+    # [start, stop) row span, and hand out `.iloc[start:stop]` slices.
+    # That turns a 49k-element scan into a dict hit plus a positional
+    # slice, and -- unlike building 240 per-series copies -- it stores no
+    # second copy of the data.
+
+    def _anomaly_index(self):
+        if self._anom_sorted is None:
+            df = self.anomalies.sort_values(["series", "Date"], kind="mergesort").reset_index(drop=True)
+            codes = df["series"].values
+            spans = {}
+            start = 0
+            for i in range(1, len(codes) + 1):
+                if i == len(codes) or codes[i] != codes[start]:
+                    spans[codes[start]] = (start, i)
+                    start = i
+            self._anom_sorted, self._anom_spans = df, spans
+        return self._anom_sorted, self._anom_spans
+
+    def anomalies_for(self, key: str) -> pd.DataFrame:
+        """All anomaly rows for one series, ascending by Date."""
+        df, spans = self._anomaly_index()
+        span = spans.get(key)
+        if span is None:
+            return df.iloc[0:0]
+        return df.iloc[span[0]:span[1]]
+
+    def _forecast_index(self):
+        if self._fc_sorted is None:
+            df = self.forecasts.sort_values(["series", "week_ahead"], kind="mergesort").reset_index(drop=True)
+            codes = df["series"].values
+            spans = {}
+            start = 0
+            for i in range(1, len(codes) + 1):
+                if i == len(codes) or codes[i] != codes[start]:
+                    spans[codes[start]] = (start, i)
+                    start = i
+            self._fc_sorted, self._fc_spans = df, spans
+        return self._fc_sorted, self._fc_spans
+
+    def forecasts_for(self, key: str) -> pd.DataFrame:
+        """All forecast rows for one series, ascending by week_ahead."""
+        df, spans = self._forecast_index()
+        span = spans.get(key)
+        if span is None:
+            return df.iloc[0:0]
+        return df.iloc[span[0]:span[1]]
+
+    def yoy_table(self) -> pd.DataFrame:
+        """Latest value and year-over-year % change for every series.
+
+        Replaces a per-series loop that re-scanned the whole 49k-row
+        anomaly frame twice per series (once for the series, once for the
+        matching week 52 weeks earlier) -- 240 series x 49k object-dtype
+        string comparisons, which cProfile showed as ~200 ms of
+        `comp_method_OBJECT_ARRAY` per call. Here it is one sorted pass
+        plus one indexed lookup of the prior-year rows.
+        """
+        if self._yoy_table is None:
+            df, spans = self._anomaly_index()
+            # Last row of each span is that series' latest week.
+            last_pos = [stop - 1 for _, stop in (spans[k] for k in sorted(spans))]
+            latest = df.iloc[last_pos]
+            sales = df.set_index(["series", "Date"])["Weekly_Sales"]
+            prior_keys = pd.MultiIndex.from_arrays(
+                [latest["series"].values, latest["Date"].values - pd.Timedelta(weeks=52)]
+            )
+            prior = sales.reindex(prior_keys).values
+            out = pd.DataFrame({
+                "series": latest["series"].values,
+                "latest_value": latest["Weekly_Sales"].values,
+                "prior_value": prior,
+            })
+            # Mirrors the old loop's skips exactly: no row 52 weeks back, or
+            # a prior value of 0 (which would make the % change meaningless).
+            out = out[~(out["prior_value"].isna() | (out["prior_value"] == 0))]
+            out["pct_change_yoy"] = (
+                100 * (out["latest_value"] - out["prior_value"]) / out["prior_value"].abs()
+            ).round(1)
+            out["latest_value"] = out["latest_value"].astype(float).round(2)
+            self._yoy_table = out[["series", "pct_change_yoy", "latest_value"]].reset_index(drop=True)
+        return self._yoy_table
+
+    def future_covariates(self):
+        """The 8 future covariate rows, shared by every series.
+
+        These depend only on the raw dataset's last observed week, so they
+        are identical for every request -- rebuilding them per request was
+        ~1 ms of pure waste on each /api/explain and /api/simulate call.
+        """
+        if self._future_cov is None:
+            from scripts.run_pipeline import make_future_covariates
+            from .backtest import HORIZON
+            self._future_cov = make_future_covariates(self.raw_sales(), HORIZON)
+        return self._future_cov
+
+    def gbm_forecast_rows(self, store: int, dept: int):
+        """The recursive GBM forecast for one series, plus the exact
+        feature row behind each of the 8 horizon steps.
+
+        The recursion is inherently sequential -- step h+1 needs step h's
+        prediction as a lag feature -- so unlike the occlusion loop it
+        cannot be batched into one `predict`. But it is a pure function of
+        artifacts this process holds fixed, so it only ever needs computing
+        once per series: /api/explain for week_ahead=1..8 all read
+        different rows out of the SAME recursion, and before this each of
+        those 8 requests redid all 8 steps from scratch (~27 ms each).
+
+        Bounded by construction: at most one entry per (store, dept) in
+        the dataset (240 here), each holding 8 one-row frames.
+        """
+        cache_key = (store, dept)
+        if cache_key not in self._gbm_rows:
+            from .backtest import HORIZON, _recursive_gbm_forecast_with_rows
+            from scripts.run_pipeline import _gbm_covariates_for_series
+            raw = self.raw_sales()
+            hist = raw[(raw.Store == store) & (raw.Dept == dept)].sort_values("Date")
+            if hist.empty:
+                self._gbm_rows[cache_key] = None
+            else:
+                cov = _gbm_covariates_for_series(self.future_covariates(), hist, store, dept)
+                preds, rows = _recursive_gbm_forecast_with_rows(self.point_gbm(), hist, cov, HORIZON)
+                self._gbm_rows[cache_key] = (preds, rows, cov)
+        return self._gbm_rows[cache_key]
 
     def raw_sales(self):
         """Lazily loaded, cached: only what simulate_scenario needs, since
@@ -97,7 +245,7 @@ def _store() -> DataStore:
 def tool_get_forecast(store: int, dept: int) -> dict:
     ds = _store()
     key = ds.series_key(store, dept)
-    rows = ds.forecasts[ds.forecasts["series"] == key].sort_values("week_ahead")
+    rows = ds.forecasts_for(key)
     if rows.empty:
         return {"error": f"no forecast found for store={store} dept={dept}"}
     summary = ds.series_summary[(ds.series_summary["series"] == key)]
@@ -122,7 +270,9 @@ def tool_get_forecast(store: int, dept: int) -> dict:
 def tool_get_anomalies(store: int, dept: int, only_needs_investigation: bool = True, limit: int = 10) -> dict:
     ds = _store()
     key = ds.series_key(store, dept)
-    df = ds.anomalies[ds.anomalies["series"] == key].sort_values("Date", ascending=False)
+    # ascending-by-Date slice, reversed -> newest first (the (series, Date)
+    # pair is unique, so this is the same ordering the old sort produced)
+    df = ds.anomalies_for(key).iloc[::-1]
     if only_needs_investigation:
         df = df[df["needs_investigation"]]
     df = df.head(limit)
@@ -148,7 +298,7 @@ def tool_explain_change(store: int, dept: int) -> dict:
     so the answer is a reasoned explanation, not just a number."""
     ds = _store()
     key = ds.series_key(store, dept)
-    df = ds.anomalies[ds.anomalies["series"] == key].sort_values("Date")
+    df = ds.anomalies_for(key)
     if df.empty:
         return {"error": f"no history for store={store} dept={dept}"}
     latest = df.iloc[-1]
@@ -177,20 +327,10 @@ def tool_explain_change(store: int, dept: int) -> dict:
 
 def tool_top_movers(direction: str = "down", n: int = 5) -> dict:
     ds = _store()
-    df = ds.anomalies.sort_values(["series", "Date"])
-    latest_per_series = df.groupby("series").tail(1)
-    yoy_rows = []
-    for _, row in latest_per_series.iterrows():
-        prior = df[(df["series"] == row["series"]) & (df["Date"] == row["Date"] - pd.Timedelta(weeks=52))]
-        if prior.empty or not prior.iloc[0]["Weekly_Sales"]:
-            continue
-        pct = 100 * (row["Weekly_Sales"] - prior.iloc[0]["Weekly_Sales"]) / abs(prior.iloc[0]["Weekly_Sales"])
-        yoy_rows.append({"series": row["series"], "pct_change_yoy": round(pct, 1),
-                          "latest_value": round(float(row["Weekly_Sales"]), 2)})
-    yoy_df = pd.DataFrame(yoy_rows)
+    yoy_df = ds.yoy_table()
     if yoy_df.empty:
         return {"movers": []}
-    yoy_df = yoy_df.sort_values("pct_change_yoy", ascending=(direction == "down"))
+    yoy_df = yoy_df.sort_values("pct_change_yoy", ascending=(direction == "down"), kind="mergesort")
     return {"direction": direction, "movers": yoy_df.head(n).to_dict("records")}
 
 
@@ -199,7 +339,7 @@ def tool_explain_forecast_drivers(store: int, dept: int, week_ahead: int = 1) ->
     forecasted week (src/explain.py) -- only meaningful for series whose
     selected model is the global GBM, since seasonal_naive/Holt-Winters
     have no per-feature model to attribute anything to."""
-    from .backtest import HORIZON, _recursive_gbm_forecast_with_rows
+    from .backtest import HORIZON
     from . import explain
 
     ds = _store()
@@ -211,20 +351,14 @@ def tool_explain_forecast_drivers(store: int, dept: int, week_ahead: int = 1) ->
                           f"a classical method with no per-feature attribution to give)"}
     week_ahead = max(1, min(int(week_ahead), HORIZON))
 
-    raw = ds.raw_sales()
-    hist = raw[(raw.Store == store) & (raw.Dept == dept)].sort_values("Date")
-    if hist.empty:
+    # One cached recursion per series serves all 8 week_ahead values.
+    cached = ds.gbm_forecast_rows(store, dept)
+    if cached is None:
         return {"error": f"no history for store={store} dept={dept}"}
-
-    from scripts.run_pipeline import make_future_covariates, _gbm_covariates_for_series
-    future_cov = make_future_covariates(raw, HORIZON)
-    cov = _gbm_covariates_for_series(future_cov, hist, store, dept)
-
-    model = ds.point_gbm()
-    _, rows = _recursive_gbm_forecast_with_rows(model, hist, cov, HORIZON)
+    _, rows, cov = cached
     row = rows[week_ahead - 1]
 
-    result = explain.occlusion_attribution(model, row, ds.feature_medians())
+    result = explain.occlusion_attribution(ds.point_gbm(), row, ds.feature_medians())
     result["series"] = key
     result["week_ahead"] = week_ahead
     result["forecast_date"] = str(cov["Date"].iloc[week_ahead - 1].date())
@@ -259,7 +393,7 @@ def tool_simulate_scenario(store: int, dept: int, markdown_active: bool = False,
     if scenario_preds is None:
         return {"error": f"no history for store={store} dept={dept}"}
 
-    baseline_rows = ds.forecasts[ds.forecasts["series"] == key].sort_values("week_ahead").head(weeks)
+    baseline_rows = ds.forecasts_for(key).head(weeks)
     baseline = baseline_rows["forecast_value"].values
     return {
         "series": key,
